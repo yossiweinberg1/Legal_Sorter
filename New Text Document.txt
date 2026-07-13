@@ -1,0 +1,103 @@
+import requests
+from bs4 import BeautifulSoup
+import yaml
+import os
+import getpass
+
+def force_website_token_rotation(email, password, config_path="config.yaml", fetch_path="src/legal_fetch.py"):
+    """
+    Logs directly into the CourtListener website, triggers the token 
+    regeneration button, extracts the new key, and updates the local system.
+    """
+    LOGIN_URL = "https://www.courtlistener.com/sign-in/"
+    TOKEN_URL = "https://www.courtlistener.com/profile/api-token/"
+    
+    session = requests.Session()
+    print("[*] Contacting CourtListener login portal...", flush=True)
+    
+    try:
+        init_response = session.get(LOGIN_URL)
+        soup = BeautifulSoup(init_response.text, 'html.parser')
+        csrf_token = soup.find('input', {'name': 'csrfmiddlewaretoken'})['value']
+    except Exception as e:
+        print(f"[CRITICAL] Failed to parse login page security tokens: {e}", flush=True)
+        return False
+    
+    payload = {
+        'username': email,
+        'password': password,
+        'csrfmiddlewaretoken': csrf_token
+    }
+    
+    print("[*] Submitting credentials...", flush=True)
+    login_response = session.post(LOGIN_URL, data=payload, headers={'Referer': LOGIN_URL})
+    
+    if "Sign Out" not in login_response.text:
+        print("[CRITICAL] Login failed! Check your email and password.", flush=True)
+        return False
+        
+    print("[+] Session authenticated successfully.", flush=True)
+    
+    try:
+        token_page = session.get(TOKEN_URL)
+        soup = BeautifulSoup(token_page.text, 'html.parser')
+        regen_csrf = soup.find('input', {'name': 'csrfmiddlewaretoken'})['value']
+    except Exception as e:
+        print(f"[CRITICAL] Failed to parse profile page security tokens: {e}", flush=True)
+        return False
+    
+    print("[*] Triggering web token regeneration...", flush=True)
+    regen_response = session.post(TOKEN_URL, data={'csrfmiddlewaretoken': regen_csrf}, headers={'Referer': TOKEN_URL})
+    
+    final_soup = BeautifulSoup(regen_response.text, 'html.parser')
+    token_element = final_soup.find('code') or final_soup.find(class_='api-token')
+    
+    if not token_element:
+        print("[CRITICAL] Could not locate the new token string in the webpage HTML.", flush=True)
+        return False
+        
+    new_token = token_element.text.strip()
+    print(f"[+] Successfully intercepted new token: ...{new_token[-6:]}", flush=True)
+    
+    _execute_system_purge(new_token, config_path, fetch_path)
+    return True
+
+
+def _execute_system_purge(new_token, config_path, fetch_path):
+    """Internal helper to overwrite configs and completely wipe the old key."""
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f) or {}
+    else:
+        config = {}
+
+    old_token = config.get("api_token")
+    config["api_token"] = new_token
+    
+    with open(config_path, "w") as f:
+        yaml.safe_dump(config, f)
+    print("[+] config.yaml sanitized and updated.", flush=True)
+
+    if old_token and os.path.exists(fetch_path):
+        with open(fetch_path, "r") as f:
+            content = f.read()
+        
+        if old_token in content:
+            content = content.replace(old_token, new_token)
+            with open(fetch_path, "w") as f:
+                f.write(content)
+            print("[+] Old key completely purged from legal_fetch.py environment.", flush=True)
+
+
+if __name__ == "__main__":
+    print("=== LegalSorter Automated Token Rotator ===")
+    user_email = input("Enter CourtListener Email: ").strip()
+    user_pass = getpass.getpass("Enter CourtListener Password: ") 
+    
+    print("\n--- Starting Rotation Sequence ---")
+    success = force_website_token_rotation(user_email, user_pass)
+    
+    if success:
+        print("--- Sequence Complete: System is ready to crawl ---")
+    else:
+        print("--- Sequence Failed ---")
