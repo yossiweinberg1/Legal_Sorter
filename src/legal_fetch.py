@@ -2,6 +2,9 @@ import json
 import requests
 import logging
 from pathlib import Path
+import tempfile
+import os
+from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
 
@@ -130,3 +133,44 @@ class CourtListenerClient:
                 break  # one new case per call; remove this to grab all results
 
         return saved
+
+    def download_to_temp(self, source_url: str, ref_no: str, timeout: int = 30):
+        """
+        Download a URL using the client's session to a temp file and return the temp path.
+        Returns (True, tmp_path) on success or (False, error_message) on failure.
+        """
+        if not source_url:
+            return False, "No source_url provided."
+
+        try:
+            resp = self.session.get(source_url, timeout=timeout, stream=True)
+            resp.raise_for_status()
+        except Exception as e:
+            return False, f"Download failed: {e}"
+
+        # Infer suffix from headers or URL
+        suffix = ""
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if "pdf" in ctype:
+            suffix = ".pdf"
+        elif "html" in ctype or "text" in ctype:
+            suffix = ".html"
+        else:
+            path = urlparse(source_url).path
+            if "." in path:
+                suffix = os.path.splitext(path)[1]
+            else:
+                suffix = ".bin"
+
+        tmp_name = f"{ref_no}{suffix}"
+        tmp_path = os.path.join(tempfile.gettempdir(), tmp_name)
+
+        try:
+            with open(tmp_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+        except Exception as e:
+            return False, f"Write failed: {e}"
+
+        return True, tmp_path

@@ -142,7 +142,10 @@ def run_bulk_batch(cfg: dict, db: DB, max_items: int = 100) -> int:
                 state["rows_consumed"] = rows_seen
                 continue
 
-            source_url = f"{base_url.rstrip('/')}/opinions/{opinion_id}/"
+            # Synthetic URL for bulk data
+            bulk_file = state["url"].split("/")[-1]   # opinions-2024-07-01.csv.bz2
+            source_url = f"bulk://{bulk_file}#{opinion_id}"
+
 
             existing = db.conn.execute(
                 "SELECT 1 FROM documents WHERE source_url=?", (source_url,)
