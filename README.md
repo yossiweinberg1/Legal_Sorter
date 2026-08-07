@@ -34,6 +34,8 @@ for potentially thousands of cases, not the PDFs themselves.
 
 ## Setup
 
+Need the owner/operator version of setup? See `README_OWNER_SETUP.md`.
+
 ### 1. Install Python packages
 ```
 pip install -r requirements.txt
@@ -161,6 +163,11 @@ LegalSorter.vbs
 uvicorn web_app:app --host 0.0.0.0 --port 8000
 ```
 Then open http://localhost:8000 in your browser.
+
+Containerized demo/hosting option:
+```
+docker compose up --build
+```
 
 API docs are auto-generated at http://localhost:8000/docs
 

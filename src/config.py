@@ -55,7 +55,41 @@ def _parse_api_keys(raw: str) -> list[dict]:
         parsed.append({"role": role, "key": key})
     return parsed
 
+
+def _strip_wrapping_quotes(value: str) -> str:
+    raw = (value or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        return raw[1:-1]
+    return raw
+
+
+def _load_dotenv(path: str | Path | None) -> None:
+    if not path:
+        return
+    env_path = Path(path)
+    if not env_path.exists() or not env_path.is_file():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.lower().startswith("export "):
+            stripped = stripped[7:].strip()
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = _strip_wrapping_quotes(value)
+
 def _apply_env_overrides(cfg: dict) -> dict:
+    for key in REQUIRED_DIR_KEYS:
+        env_key = f"LEGAL_SORTER_{key.upper()}"
+        env_value = os.getenv(env_key)
+        if env_value:
+            cfg[key] = env_value.strip()
+
     cl_cfg = cfg.setdefault("courtlistener", {})
     env_tokens = os.getenv("COURTLISTENER_API_TOKENS")
     env_token = os.getenv("COURTLISTENER_API_TOKEN")
@@ -89,6 +123,12 @@ def _apply_env_overrides(cfg: dict) -> dict:
     audit_log_path = os.getenv("LEGAL_SORTER_AUDIT_LOG_PATH")
     if audit_log_path:
         prod_cfg["audit_log_path"] = audit_log_path.strip()
+    quarantine_folder = os.getenv("LEGAL_SORTER_QUARANTINE_FOLDER")
+    if quarantine_folder:
+        prod_cfg["quarantine_folder"] = quarantine_folder.strip()
+    support_email = os.getenv("LEGAL_SORTER_SUPPORT_EMAIL")
+    if support_email:
+        prod_cfg["support_email"] = support_email.strip()
 
     return cfg
 
@@ -228,11 +268,13 @@ def load_config(path: str = None, strict: bool = False) -> dict:
     if path is None:
         # config.yaml lives one level above src/
         path = Path(__file__).resolve().parent.parent / "config.yaml"
-    cache_key = (str(Path(path)), bool(strict))
+    config_path = Path(path)
+    _load_dotenv(config_path.parent / ".env")
+    cache_key = (str(config_path), bool(strict))
     if cache_key in _CONFIG_CACHE:
         return _CONFIG_CACHE[cache_key]
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
     if not isinstance(cfg, dict):

@@ -20,6 +20,13 @@ class ConfigTests(unittest.TestCase):
         os.environ.pop("COURTLISTENER_BASE_URL", None)
         os.environ.pop("LEGAL_SORTER_API_KEYS", None)
         os.environ.pop("LEGAL_SORTER_AUTH_ENABLED", None)
+        os.environ.pop("LEGAL_SORTER_PULL_FOLDER", None)
+        os.environ.pop("LEGAL_SORTER_INDEX_FOLDER", None)
+        os.environ.pop("LEGAL_SORTER_PENDING_FOLDER", None)
+        os.environ.pop("LEGAL_SORTER_BACKUP_FOLDER", None)
+        os.environ.pop("LEGAL_SORTER_AUDIT_LOG_PATH", None)
+        os.environ.pop("LEGAL_SORTER_QUARANTINE_FOLDER", None)
+        os.environ.pop("LEGAL_SORTER_SUPPORT_EMAIL", None)
 
     def _write_cfg(self, body: str) -> Path:
         path = Path(self.tmp.name) / "config.yaml"
@@ -109,6 +116,47 @@ courtlistener:
         self.assertTrue(cfg["auth"]["enabled"])
         self.assertEqual(cfg["auth"]["api_keys"][0]["role"], "admin")
         self.assertEqual(cfg["auth"]["api_keys"][1]["role"], "reader")
+
+    def test_dotenv_is_loaded_from_config_directory(self):
+        base = Path(self.tmp.name)
+        cfg_path = self._write_cfg(
+            f"""
+pull_folder: "{base / 'pull5'}"
+index_folder: "{base / 'index5'}"
+pending_folder: "{base / 'pending5'}"
+courtlistener:
+  base_url: "https://example.com"
+  api_tokens: []
+"""
+        )
+        (base / ".env").write_text(
+            'COURTLISTENER_API_TOKEN=dotenv-token\nLEGAL_SORTER_SUPPORT_EMAIL="owner@example.com"\n',
+            encoding="utf-8",
+        )
+        cfg = cfgmod.load_config(str(cfg_path))
+        self.assertEqual(cfg["courtlistener"]["api_tokens"], ["dotenv-token"])
+        self.assertEqual(cfg["production"]["support_email"], "owner@example.com")
+
+    def test_directory_env_overrides_apply(self):
+        base = Path(self.tmp.name)
+        cfg_path = self._write_cfg(
+            f"""
+pull_folder: "{base / 'pull6'}"
+index_folder: "{base / 'index6'}"
+pending_folder: "{base / 'pending6'}"
+courtlistener:
+  base_url: "https://example.com"
+  api_tokens: []
+"""
+        )
+        os.environ["LEGAL_SORTER_PULL_FOLDER"] = str(base / "env-pull")
+        os.environ["LEGAL_SORTER_INDEX_FOLDER"] = str(base / "env-index")
+        os.environ["LEGAL_SORTER_PENDING_FOLDER"] = str(base / "env-pending")
+        cfg = cfgmod.load_config(str(cfg_path))
+        self.assertEqual(cfg["pull_folder"], str(base / "env-pull"))
+        self.assertEqual(cfg["index_folder"], str(base / "env-index"))
+        self.assertEqual(cfg["pending_folder"], str(base / "env-pending"))
+        self.assertTrue((base / "env-pull").exists())
 
 
 if __name__ == "__main__":
