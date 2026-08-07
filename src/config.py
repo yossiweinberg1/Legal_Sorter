@@ -215,6 +215,8 @@ def validate_config(cfg: dict, strict: bool = False) -> tuple[list[str], list[st
                 seen_keys.add(key)
     if bool(auth_cfg.get("enabled")) and not api_keys:
         errors.append("auth.api_keys is required when auth.enabled is true.")
+    if strict and not bool(auth_cfg.get("enabled")):
+        errors.append("auth.enabled must be true in strict readiness mode.")
 
     return errors, warnings
 

@@ -109,6 +109,11 @@ def _check_production_baseline() -> tuple[bool, str]:
         return False, f"Backup folder is invalid: {backup_folder}"
     if not os.access(backup_folder, os.W_OK):
         return False, f"Backup folder is not writable: {backup_folder}"
+    quarantine_folder = Path(str(prod.get("quarantine_folder", "")))
+    if not quarantine_folder.exists() or not quarantine_folder.is_dir():
+        return False, f"Quarantine folder is invalid: {quarantine_folder}"
+    if not os.access(quarantine_folder, os.W_OK):
+        return False, f"Quarantine folder is not writable: {quarantine_folder}"
 
     enabled = bool(prod.get("enabled", False))
     status = "enabled" if enabled else "configured (disabled)"
