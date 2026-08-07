@@ -87,13 +87,15 @@ _safe_console_print("[Bootloader] All systems green. Initializing Tkinter window
 # =====================================================================
 # Icon helpers
 # =====================================================================
-from src.icon_utils import make_icon_ico as _make_icon_ico, ensure_icon as _ensure_icon
+from src.icon_utils import ensure_icon as _ensure_icon, ensure_logo_png as _ensure_logo_png
 
 _ICON_PATH = Path(__file__).resolve().parent / "legal_sorter.ico"
+_LOGO_PNG_PATH = Path(__file__).resolve().parent / "legal_sorter.png"
 
-# Pre-generate the icon once so the shortcut creator can also reference it
+# Pre-generate the icon assets once so the shortcut creator can also reference them
 try:
     _ensure_icon(_ICON_PATH)
+    _ensure_logo_png(_LOGO_PNG_PATH, size=256)
 except Exception:
     pass
 
@@ -145,25 +147,10 @@ class LegalSorterApp:
             except Exception:
                 pass  # fall through to PhotoImage fallback
 
-        # ── Other platforms: paint a PhotoImage programmatically ──────────────
+        # ── Other platforms: use the shared PNG logo ──────────────────────────
         try:
-            self._app_icon = tk.PhotoImage(width=64, height=64)
-            icon = self._app_icon
-            # Dark-navy background
-            icon.put("#1E2D40", to=(0, 0, 64, 64))
-            # Teal balance-scale beam (row ~24, cols 10–54)
-            icon.put("#3E9BC0", to=(10, 22, 54, 26))
-            # Teal centre post (col 30–34, rows 6–22 and 38–52)
-            icon.put("#3E9BC0", to=(29, 6, 33, 22))
-            icon.put("#3E9BC0", to=(29, 38, 33, 52))
-            # Teal left pan (cols 8–20, rows 28–34)
-            icon.put("#3E9BC0", to=(8, 28, 20, 34))
-            # Teal right pan (cols 43–55, rows 28–34)
-            icon.put("#3E9BC0", to=(43, 28, 55, 34))
-            # Steel-gray document stack
-            icon.put("#8FA3B1", to=(20, 38, 44, 46))
-            icon.put("#8FA3B1", to=(22, 47, 42, 54))
-            self.root.iconphoto(True, icon)
+            self._app_icon = tk.PhotoImage(file=_ensure_logo_png(_LOGO_PNG_PATH, size=256))
+            self.root.iconphoto(True, self._app_icon)
         except Exception:
             self._app_icon = None
 
