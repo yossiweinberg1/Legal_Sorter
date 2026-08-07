@@ -216,7 +216,7 @@ def ingest(body: IngestRequest):
       3. Return a summary: new cases stored, duplicates skipped.
 
     The text may contain a single opinion or many opinions separated by blank
-    lines.  The endpoint splits on double-blank-lines (common court-document
+    lines.  The endpoint splits on 2-blank-line boundaries (common court-document
     separator) and processes each segment individually so a massive paste does
     not end up as one giant undifferentiated record.
     """
@@ -243,10 +243,14 @@ def ingest(body: IngestRequest):
 
     for seg in segments:
         content_hash = hashlib.sha256(seg.encode("utf-8")).hexdigest()
+        # Use the ingest:// source_url (written to the sidecar) as the
+        # canonical dedup key — this is the value that watcher.process_file
+        # stores and is independent of the temp-file content hash.
+        ingest_url = f"ingest://{content_hash}"
 
         # Check for duplicate before writing anything
         existing = db.conn.execute(
-            "SELECT ref_no FROM documents WHERE id = ?", (content_hash,)
+            "SELECT ref_no FROM documents WHERE source_url = ?", (ingest_url,)
         ).fetchone()
         if existing:
             duplicates.append(existing[0] or content_hash[:12])
@@ -265,24 +269,26 @@ def ingest(body: IngestRequest):
                 tmp.write(seg)
                 tmp_path = tmp.name
 
-            # Write a minimal sidecar so the pipeline has a label
+            # Write a minimal sidecar so the pipeline has a label and the
+            # canonical source_url used for dedup above.
             label = (body.label or "").strip()[:120] or f"ingest:{content_hash[:12]}"
             sidecar_path = tmp_path + ".meta.json"
             Path(sidecar_path).write_text(
-                json.dumps({"source_url": f"ingest://{content_hash}", "case_name": label}),
+                json.dumps({"source_url": ingest_url, "case_name": label}),
                 encoding="utf-8",
             )
 
             watchermod.process_file(tmp_path, cfg, db)
 
-            # Retrieve the ref_no that was just assigned (if any)
+            # Retrieve the ref_no that was just assigned via the source_url key
             row = db.conn.execute(
-                "SELECT ref_no, virtual_folder FROM documents WHERE id = ?", (content_hash,)
+                "SELECT ref_no, virtual_folder FROM documents WHERE source_url = ?", (ingest_url,)
             ).fetchone()
             if row:
                 stored.append({"ref_no": row[0], "virtual_folder": row[1]})
             else:
-                # process_file may have computed a different id (file-hash); retrieve latest
+                # Fallback: grab the most-recently inserted row if the
+                # pipeline stored it under a different id
                 row2 = db.conn.execute(
                     "SELECT ref_no, virtual_folder FROM documents ORDER BY rowid DESC LIMIT 1"
                 ).fetchone()
@@ -671,7 +677,7 @@ _HTML = r"""<!DOCTYPE html>
       <div class="gh-box-body">
         <p class="muted" style="margin:0 0 10px">
           Drop in any amount of raw legal text. The pipeline will
-          <strong>split on triple blank lines</strong>, content-hash each segment for
+          <strong>split on 2 blank lines</strong>, content-hash each segment for
           <strong>de-duplication</strong>, run <strong>citation extraction</strong>,
           <strong>keyword tagging</strong>, and <strong>virtual-folder categorization</strong>
           before storing in the database.
@@ -682,7 +688,7 @@ _HTML = r"""<!DOCTYPE html>
             placeholder="e.g. Smith v. Jones — SDNY 2023" style="margin-top:4px" />
         </div>
         <textarea id="ingest-text" class="gh-textarea" style="min-height:220px"
-          placeholder="Paste raw legal text here…"></textarea>
+          placeholder="Paste raw legal text here — separate multiple opinions with 2 blank lines…"></textarea>
         <div class="row" style="margin-top:10px">
           <button id="ingest-btn" class="btn btn-primary" onclick="doIngest()">⬆ Ingest Text</button>
           <button class="btn" onclick="document.getElementById('ingest-text').value='';document.getElementById('ingest-results').innerHTML=''">Clear</button>
@@ -820,8 +826,8 @@ async function doIngest() {
     const newRows = (d.new_records||[]).map(rec =>
       `<div class="ingest-record">✅ <strong>${escapeHtml(rec.ref_no||'?')}</strong> → ${escapeHtml(rec.virtual_folder||'Uncategorized')}</div>`
     ).join('');
-    const dupRows = (d.duplicate_refs||[]).map(r =>
-      `<div class="ingest-record dup">⚠ duplicate: ${escapeHtml(r)}</div>`
+    const dupRows = (d.duplicate_refs||[]).map(dupRef =>
+      `<div class="ingest-record dup">⚠ duplicate: ${escapeHtml(dupRef)}</div>`
     ).join('');
 
     tgt.innerHTML = `
