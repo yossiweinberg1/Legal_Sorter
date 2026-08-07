@@ -9,7 +9,7 @@ from src import config as cfgmod
 class ConfigTests(unittest.TestCase):
     def setUp(self):
         self._old_cache = cfgmod._CONFIG_CACHE
-        cfgmod._CONFIG_CACHE = None
+        cfgmod._CONFIG_CACHE = {}
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
@@ -157,6 +157,25 @@ courtlistener:
         self.assertEqual(cfg["index_folder"], str(base / "env-index"))
         self.assertEqual(cfg["pending_folder"], str(base / "env-pending"))
         self.assertTrue((base / "env-pull").exists())
+
+    def test_dotenv_strips_inline_comments_from_unquoted_values(self):
+        base = Path(self.tmp.name)
+        cfg_path = self._write_cfg(
+            f"""
+pull_folder: "{base / 'pull7'}"
+index_folder: "{base / 'index7'}"
+pending_folder: "{base / 'pending7'}"
+courtlistener:
+  base_url: "https://example.com"
+  api_tokens: []
+"""
+        )
+        (base / ".env").write_text(
+            "COURTLISTENER_API_TOKEN=dotenv-token # keep comment out of value\n",
+            encoding="utf-8",
+        )
+        cfg = cfgmod.load_config(str(cfg_path))
+        self.assertEqual(cfg["courtlistener"]["api_tokens"], ["dotenv-token"])
 
 
 if __name__ == "__main__":

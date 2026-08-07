@@ -49,7 +49,7 @@ def _check_imports() -> tuple[bool, str]:
 
 
 def _check_config_and_db(strict: bool = False) -> tuple[bool, str]:
-    cfgmod._CONFIG_CACHE = None
+    cfgmod._CONFIG_CACHE = {}
     try:
         cfg = cfgmod.load_config(strict=strict)
     except Exception as exc:
@@ -91,7 +91,7 @@ def _check_config_and_db(strict: bool = False) -> tuple[bool, str]:
 
 
 def _check_production_baseline() -> tuple[bool, str]:
-    cfgmod._CONFIG_CACHE = None
+    cfgmod._CONFIG_CACHE = {}
     try:
         cfg = cfgmod.load_config(strict=True)
     except Exception as exc:

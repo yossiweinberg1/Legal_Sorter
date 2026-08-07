@@ -48,7 +48,7 @@ def main():
 
     def _load_cfg_soft() -> dict:
         try:
-            cfgmod._CONFIG_CACHE = None
+            cfgmod._CONFIG_CACHE = {}
             return cfgmod.load_config()
         except Exception:
             return {}
@@ -91,7 +91,7 @@ def main():
             sys.exit(0)
         elif args and args[0] == "backup":
             print("[Command] Creating deterministic production backup...")
-            cfgmod._CONFIG_CACHE = None
+            cfgmod._CONFIG_CACHE = {}
             cfg = cfgmod.load_config(strict=True)
             out_path = create_backup(cfg)
             verified = restore_backup(str(out_path), verify_only=True)

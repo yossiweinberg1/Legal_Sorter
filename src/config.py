@@ -58,6 +58,16 @@ def _parse_api_keys(raw: str) -> list[dict]:
 
 def _strip_wrapping_quotes(value: str) -> str:
     raw = (value or "").strip()
+    in_single = False
+    in_double = False
+    for idx, char in enumerate(raw):
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double and (idx == 0 or raw[idx - 1].isspace()):
+            raw = raw[:idx].rstrip()
+            break
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
         return raw[1:-1]
     return raw
