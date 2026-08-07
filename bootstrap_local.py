@@ -30,7 +30,10 @@ def main() -> int:
 
     _run([py, "-m", "pip", "install", "--upgrade", "pip"])
     _run([py, "-m", "pip", "install", "-r", "requirements.txt"])
-    _run([py, "run.py", "health"])
+    health = subprocess.run([py, "run.py", "health"], cwd=str(ROOT), check=False)
+    if health.returncode != 0:
+        print("\nBootstrap failed: health check reported issues.")
+        return health.returncode
 
     print("\nBootstrap complete.")
     print(f"Use interpreter: {py}")

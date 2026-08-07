@@ -365,6 +365,16 @@ function escapeHtml(value) {
   return el.innerHTML;
 }
 
+function safeSourceLink(url, label = 'Source ↗') {
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/i.test(parsed.protocol)) return '';
+    return `<a href="${escapeHtml(parsed.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+  } catch (_e) {
+    return '';
+  }
+}
+
 async function loadStats() {
   const target = document.getElementById('stats');
   try {
@@ -385,9 +395,7 @@ function resultCard(item) {
   const ref = escapeHtml(item.ref_no || 'N/A');
   const folder = escapeHtml(item.virtual_folder || 'Uncategorized');
   const snippet = escapeHtml(item.snippet || '');
-  const source = item.source_url && /^https?:\/\//i.test(item.source_url)
-    ? `<a href="${encodeURI(item.source_url)}" target="_blank" rel="noopener noreferrer">Source ↗</a>`
-    : '<span class="small">No source URL</span>';
+  const source = safeSourceLink(item.source_url) || '<span class="small">No source URL</span>';
   return `
     <div class="result">
       <div><strong>${ref}</strong></div>
@@ -477,9 +485,7 @@ async function doAsk() {
     const answer = escapeHtml(d.answer || 'No answer returned.');
     const sources = (d.sources || []).map(s => {
       const label = `${escapeHtml(s.ref_no || (s.doc_id || '').slice(0, 12) || '?')} — ${escapeHtml(s.virtual_folder || 'Uncategorized')}`;
-      const link = (s.source_url && /^https?:\/\//i.test(s.source_url))
-        ? ` <a href="${encodeURI(s.source_url)}" target="_blank" rel="noopener noreferrer">↗</a>`
-        : '';
+      const link = s.source_url ? ` ${safeSourceLink(s.source_url, '↗')}` : '';
       return `<li>${label}${link}</li>`;
     }).join('');
 

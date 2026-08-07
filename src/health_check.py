@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -65,12 +64,18 @@ def _check_config_and_db() -> tuple[bool, str]:
             return False, f"Configured path is not a folder: {path}"
 
     db_path = Path(cfg["index_folder"]) / "legal_sorter.db"
-    DB(str(db_path))
+    db = None
     try:
-        with sqlite3.connect(db_path) as conn:
-            conn.execute("SELECT 1 FROM documents LIMIT 1")
+        db = DB(str(db_path))
+        db.conn.execute("SELECT 1 FROM documents LIMIT 1")
     except Exception as exc:
         return False, f"Database check failed: {exc}"
+    finally:
+        if db is not None:
+            try:
+                db.conn.close()
+            except Exception:
+                pass
 
     token_ok = bool(os.getenv("COURTLISTENER_API_TOKEN") or os.getenv("COURTLISTENER_API_TOKENS"))
     llm_ok = bool(os.getenv("LLM_API_KEY"))
