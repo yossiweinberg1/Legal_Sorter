@@ -38,6 +38,16 @@ def _subprocess_creationflags() -> int:
     return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
+def _safe_traceback_print() -> None:
+    if sys.stderr is None:
+        return
+    try:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+    except Exception:
+        pass
+
+
 if getattr(sys.stdout, "reconfigure", None):
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -70,8 +80,7 @@ try:
     _safe_console_print(f"[Bootloader] Training matrix loaded successfully in {time.time() - start_t:.2f}s.")
 except Exception as e:
     _safe_console_print(f"[Bootloader ❌ ERROR] Pre-import sequence failed: {e}")
-    import traceback
-    traceback.print_exc()
+    _safe_traceback_print()
 
 _safe_console_print("[Bootloader] All systems green. Initializing Tkinter window...\n")
 
@@ -1888,10 +1897,9 @@ class LegalSorterApp:
 
                 match = re.search(r'#(\d+)$', source_url or "")
                 case_label = ref_no or (f"bulk_{match.group(1)}.txt" if match else target_label)
-                lookup_label = case_label or target_label
 
                 try:
-                    result = get_similar_cases(lookup_label, top_n=3)
+                    result = get_similar_cases(case_label, top_n=3)
                 except Exception as e:
                     sim_label.config(text=f"Matrix Error: {e}", foreground="#e74c3c")
                     return
