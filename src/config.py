@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-_CONFIG_CACHE = None
+_CONFIG_CACHE = {}
 REQUIRED_DIR_KEYS = ("pull_folder", "index_folder", "pending_folder")
 ALLOWED_ROLES = {"reader", "operator", "admin"}
 
@@ -223,12 +223,14 @@ def validate_config(cfg: dict, strict: bool = False) -> tuple[list[str], list[st
 
 def load_config(path: str = None, strict: bool = False) -> dict:
     global _CONFIG_CACHE
-    if _CONFIG_CACHE is not None:
-        return _CONFIG_CACHE
-
+    if not isinstance(_CONFIG_CACHE, dict):
+        _CONFIG_CACHE = {}
     if path is None:
         # config.yaml lives one level above src/
         path = Path(__file__).resolve().parent.parent / "config.yaml"
+    cache_key = (str(Path(path)), bool(strict))
+    if cache_key in _CONFIG_CACHE:
+        return _CONFIG_CACHE[cache_key]
 
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
@@ -258,5 +260,5 @@ def load_config(path: str = None, strict: bool = False) -> dict:
             else:
                 path.mkdir(parents=True, exist_ok=True)
 
-    _CONFIG_CACHE = cfg
+    _CONFIG_CACHE[cache_key] = cfg
     return cfg

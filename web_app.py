@@ -214,7 +214,7 @@ def ask(body: AskRequest, principal: dict = Depends(require_reader)):
             "sources": sources,
             "diagnostics": {
                 "grounded_source_count": len(sources),
-                "grounded": any("[SOURCE " in answer for _ in [0]),
+                "grounded": "[SOURCE " in answer,
             },
         }
     except RuntimeError as exc:
