@@ -54,7 +54,7 @@ def _load_llm_cfg() -> dict:
     llm = cfg.get("llm", {})
     return {
         "base_url": llm.get("base_url", "https://api.openai.com/v1").rstrip("/"),
-        "api_key": os.environ.get("LLM_API_KEY") or llm.get("api_key", ""),
+        "api_key": os.environ.get("LLM_API_KEY", ""),
         "model": llm.get("model", "gpt-4o-mini"),
         "max_context_chars": int(llm.get("max_context_chars", 12000)),
     }
@@ -194,8 +194,9 @@ def _rank(rows: list[_CaseRow], query: str, top_k: int) -> list[_CaseRow]:
     terms = set(_tokenize(query))
     if not terms:
         return rows[:top_k]
-    scored = sorted(rows, key=lambda r: _score(r, terms), reverse=True)
-    return [r for r in scored if _score(r, terms) > 0][:top_k]
+    scored = [(r, _score(r, terms)) for r in rows]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [r for r, s in scored if s > 0][:top_k]
 
 
 def _snippet(text: str, query_terms: set[str], max_chars: int = 400) -> str:

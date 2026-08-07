@@ -784,7 +784,7 @@ class LegalSorterApp:
             return
         self._ai_busy = True
         self._ai_set_status("⏳ Searching archive…")
-        threading.Thread(target=self._ai_worker_ask, args=(prompt,), daemon=True).start()
+        threading.Thread(target=self._ai_worker_semantic, args=(prompt,), daemon=True).start()
 
     def _ai_semantic(self):
         prompt = self._ai_get_prompt()
@@ -924,7 +924,7 @@ class LegalSorterApp:
             else:
                 console_tag = "info"
             self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, f"\n[AI Engine] {text_string}", console_tag)
+            self.log_text.insert(tk.END, f"\n[Engine] {text_string}", console_tag)
             self.log_text.see(tk.END)
             self.log_text.config(state=tk.DISABLED)
         self.root.after(0, append_action)
