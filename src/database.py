@@ -42,11 +42,19 @@ CREATE TABLE IF NOT EXISTS ref_counter (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     next_value INTEGER DEFAULT 1
 );
+
+CREATE INDEX IF NOT EXISTS idx_documents_added_at ON documents (added_at DESC);
+CREATE INDEX IF NOT EXISTS idx_documents_virtual_folder ON documents (virtual_folder);
+CREATE INDEX IF NOT EXISTS idx_priority_queue_status ON priority_queue (status);
 """
 class DB:
     def __init__(self, db_path: str):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
+        # WAL mode allows readers and writers to coexist without blocking each other
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
         self.conn.executescript(SCHEMA)
         self.conn.commit()
         try:
@@ -93,8 +101,13 @@ class DB:
         return cursor.fetchone()
 
     def all_texts_except(self, doc_id):
-        """Retrieves all document texts from the database except the active one."""
-        cursor = self.conn.execute("SELECT text FROM documents WHERE id != ?", (doc_id,))
+        """Retrieves up to 200 document text samples (first 8 000 chars each) from the
+        database except the active one. Capping both count and length keeps TF-IDF fast
+        regardless of archive size while still giving the vectoriser a representative corpus."""
+        cursor = self.conn.execute(
+            "SELECT SUBSTR(text, 1, 8000) FROM documents WHERE id != ? AND text IS NOT NULL LIMIT 200",
+            (doc_id,)
+        )
         rows = cursor.fetchall()
         return [row[0] for row in rows]
 

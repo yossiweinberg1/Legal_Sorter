@@ -16,6 +16,7 @@ from src import config as cfgmod
 from similarity_service import build_and_cache_index, get_similar_cases
 from src.legal_fetch import CourtListenerClient
 from src.study_assistant import generate_study_response, NO_DOCS_SENTINEL, NO_MATCH_SENTINEL
+from src.legal_ai import query_cases, analyze_case, semantic_search
 
 # Import the window class from the new file you just created
 from error_ledger import ErrorLedgerWindow
@@ -233,9 +234,111 @@ class LegalSorterApp:
     def configure_styles(self):
         """Injects clean spacing and consistent layout styling rules across widgets."""
         self.style = ttk.Style()
-        self.style.configure("Treeview", rowheight=24, font=("Segoe UI", 10))
-        self.style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
-        self.style.configure("Alert.TButton")
+        try:
+            self.style.theme_use("clam")
+        except Exception:
+            pass
+
+        # ── Palette ──────────────────────────────────────────────────
+        BG        = "#1e1e2e"   # deep navy
+        PANEL     = "#2a2a3e"   # slightly lighter panel
+        ACCENT    = "#7c83e0"   # soft indigo accent
+        ACCENT2   = "#4ade80"   # green success
+        FG        = "#cdd6f4"   # light text
+        FG_DIM    = "#888aaa"   # dim label text
+        SEL_BG    = "#3b3b58"   # selection background
+        ENTRY_BG  = "#313244"   # input field background
+        BTN_BG    = "#363654"   # button background
+        BTN_ACTIVE= "#4a4a72"   # button hover
+
+        # Root window
+        self.root.configure(bg=BG)
+
+        # General frame / label / entry
+        self.style.configure("TFrame",      background=BG)
+        self.style.configure("TLabelframe", background=PANEL, foreground=FG,
+                             relief="flat", borderwidth=1)
+        self.style.configure("TLabelframe.Label", background=PANEL, foreground=ACCENT,
+                             font=("Segoe UI", 9, "bold"))
+        self.style.configure("TLabel",      background=BG, foreground=FG,
+                             font=("Segoe UI", 10))
+        self.style.configure("Dim.TLabel",  background=BG, foreground=FG_DIM,
+                             font=("Segoe UI", 9, "italic"))
+
+        # Buttons
+        self.style.configure("TButton",
+                             background=BTN_BG, foreground=FG,
+                             font=("Segoe UI", 9),
+                             relief="flat", padding=(8, 4))
+        self.style.map("TButton",
+                       background=[("active", BTN_ACTIVE), ("disabled", "#2a2a3e")],
+                       foreground=[("disabled", "#555577")])
+
+        # Accent (primary action) button
+        self.style.configure("Accent.TButton",
+                             background=ACCENT, foreground="#ffffff",
+                             font=("Segoe UI", 9, "bold"),
+                             relief="flat", padding=(8, 4))
+        self.style.map("Accent.TButton",
+                       background=[("active", "#9499f0"), ("disabled", "#3a3a5a")])
+
+        # Success button
+        self.style.configure("Success.TButton",
+                             background="#245e3e", foreground=ACCENT2,
+                             font=("Segoe UI", 9, "bold"),
+                             relief="flat", padding=(8, 4))
+        self.style.map("Success.TButton",
+                       background=[("active", "#2e7a50")])
+
+        # Alert button
+        self.style.configure("Alert.TButton",
+                             background=BTN_BG, foreground=FG,
+                             font=("Segoe UI", 9))
+        self.style.map("Alert.TButton",
+                       background=[("active", BTN_ACTIVE)])
+
+        # Entry
+        self.style.configure("TEntry",
+                             fieldbackground=ENTRY_BG, foreground=FG,
+                             insertcolor=FG, borderwidth=0)
+
+        # Treeview
+        self.style.configure("Treeview",
+                             background=PANEL, foreground=FG,
+                             fieldbackground=PANEL,
+                             rowheight=26, font=("Segoe UI", 10),
+                             borderwidth=0)
+        self.style.configure("Treeview.Heading",
+                             background=SEL_BG, foreground=ACCENT,
+                             font=("Segoe UI", 10, "bold"))
+        self.style.map("Treeview",
+                       background=[("selected", SEL_BG)],
+                       foreground=[("selected", "#ffffff")])
+
+        # Notebook
+        self.style.configure("TNotebook",
+                             background=BG, borderwidth=0)
+        self.style.configure("TNotebook.Tab",
+                             background=PANEL, foreground=FG_DIM,
+                             font=("Segoe UI", 9), padding=(12, 5))
+        self.style.map("TNotebook.Tab",
+                       background=[("selected", BG)],
+                       foreground=[("selected", ACCENT)])
+
+        # Scrollbar
+        self.style.configure("TScrollbar",
+                             background=PANEL, troughcolor=BG,
+                             arrowcolor=FG_DIM, borderwidth=0)
+
+        # Separator
+        self.style.configure("TSeparator", background=SEL_BG)
+
+        # Store palette for use in Text widgets and dynamic styling
+        self._pal = {
+            "BG": BG, "PANEL": PANEL, "ACCENT": ACCENT, "ACCENT2": ACCENT2,
+            "FG": FG, "FG_DIM": FG_DIM, "SEL_BG": SEL_BG,
+            "ENTRY_BG": ENTRY_BG, "BTN_BG": BTN_BG,
+        }
 
     def discover_database_path(self):
         """Resolves live operational database files using project configs and fallbacks."""
@@ -250,255 +353,551 @@ class LegalSorterApp:
         if not os.path.exists(self.db_path):
             self.db_path = os.path.abspath("legal_sorter.db")
 
+    def _make_text(self, parent, **kw) -> tk.Text:
+        """Factory for styled dark Text widgets."""
+        p = self._pal
+        defaults = dict(
+            bg=p["PANEL"], fg=p["FG"],
+            insertbackground=p["FG"],
+            selectbackground=p["SEL_BG"],
+            selectforeground="#ffffff",
+            relief="flat", borderwidth=0,
+            font=("Segoe UI", 10),
+        )
+        defaults.update(kw)
+        return tk.Text(parent, **defaults)
+
     def build_ui(self):
         """Assembles the application main control board layout."""
-        # Create the physical Alert Button (packed at the absolute top-right)
+        p = self._pal
+
+        # ── Top header bar ────────────────────────────────────────────
+        header = ttk.Frame(self.root, padding=(10, 6))
+        header.pack(side=tk.TOP, fill=tk.X)
+
+        # Alert badge (right-aligned first so other items push from left)
         self.alert_btn = ttk.Button(
-            self.root, 
-            text="⚠️ Alerts (0)", 
-            command=self.open_ledger,
-            style="Alert.TButton"
+            header, text="⚠️ Alerts (0)",
+            command=self.open_ledger, style="Alert.TButton"
         )
-        self.alert_btn.pack(side=tk.TOP, anchor=tk.E, padx=10, pady=5)
+        self.alert_btn.pack(side=tk.RIGHT, padx=6)
         self.update_alert_button()
 
-        # --- Top Metrics & Control Header Bar ---
-        top_panel = ttk.Frame(self.root, padding=10)
-        top_panel.pack(side=tk.TOP, fill=tk.X)
+        # Stat labels
+        lbl_font = ("Segoe UI", 10, "bold")
+        self.stat_indexed = ttk.Label(header, text="📂 Indexed: …", font=lbl_font)
+        self.stat_indexed.pack(side=tk.LEFT, padx=12)
+        self.stat_size = ttk.Label(header, text="💾 0.00 MB", font=lbl_font)
+        self.stat_size.pack(side=tk.LEFT, padx=12)
+        self.stat_queue = ttk.Label(header, text="⏳ Queue: 0", font=lbl_font)
+        self.stat_queue.pack(side=tk.LEFT, padx=12)
+        self.stat_timer = ttk.Label(header, text="⏱ 00:00:00", font=lbl_font,
+                                    foreground=p["FG_DIM"])
+        self.stat_timer.pack(side=tk.LEFT, padx=12)
 
-        self.stat_indexed = ttk.Label(top_panel, text=" Total Indexed: Calculating...", font=("Segoe UI", 11, "bold"))
-        self.stat_indexed.pack(side=tk.LEFT, padx=15)
-    
-        self.stat_size = ttk.Label(top_panel, text=" Storage Footprint: 0.00 MB", font=("Segoe UI", 11, "bold"))
-        self.stat_size.pack(side=tk.LEFT, padx=15)
-    
-        self.stat_queue = ttk.Label(top_panel, text=" Pending Queue: 0", font=("Segoe UI", 11, "bold"))
-        self.stat_queue.pack(side=tk.LEFT, padx=15)
-    
-        self.stat_timer = ttk.Label(top_panel, text=" Run Time: 00:00:00", font=("Segoe UI", 11, "bold"), foreground="gray")
-        self.stat_timer.pack(side=tk.LEFT, padx=15)
-    
-        # =========================================================================
-        # UNIFIED COMMAND LAYOUT DECK (Primary Row)
-        # =========================================================================
-        self.btn_stop_crawler = ttk.Button(top_panel, text="Stop Crawler", command=self.stop_crawler_action)
-        self.btn_stop_crawler.pack(side=tk.RIGHT, padx=6, pady=4)
+        # ── Action button row ─────────────────────────────────────────
+        btn_bar = ttk.Frame(self.root, padding=(10, 0, 10, 4))
+        btn_bar.pack(side=tk.TOP, fill=tk.X)
 
-        self.btn_start_crawler = ttk.Button(top_panel, text="Start Crawler", command=self.start_crawler_action)
-        self.btn_start_crawler.pack(side=tk.RIGHT, padx=6, pady=4)
+        self.btn_stop_crawler  = ttk.Button(btn_bar, text="⏹ Stop",
+                                            command=self.stop_crawler_action)
+        self.btn_start_crawler = ttk.Button(btn_bar, text="▶ Start Crawler",
+                                            command=self.start_crawler_action,
+                                            style="Success.TButton")
+        self.btn_sync          = ttk.Button(btn_bar, text="🔄 Sync",
+                                            command=self.sync_database)
+        self.btn_copy_log      = ttk.Button(btn_bar, text="📋 Copy Log",
+                                            command=self.copy_log_action)
+        self.btn_view_db       = ttk.Button(btn_bar, text="🗄 Database",
+                                            command=self.open_database_viewer)
+        self.btn_open_repull   = ttk.Button(btn_bar, text="📄 Open Case",
+                                            command=self.open_selected_case)
 
-        self.btn_sync = ttk.Button(top_panel, text="Sync Dashboard", command=self.sync_database)
-        self.btn_sync.pack(side=tk.RIGHT, padx=6, pady=4)
-
-        self.btn_copy_log = ttk.Button(top_panel, text="Copy Log", command=self.copy_log_action)
-        self.btn_copy_log.pack(side=tk.RIGHT, padx=6, pady=4)
-
-        self.btn_view_db = ttk.Button(top_panel, text="View Database", command=self.open_database_viewer)
-        self.btn_view_db.pack(side=tk.RIGHT, padx=6, pady=4)
-
-        self.btn_open_repull = ttk.Button(top_panel, text="Open (repull)", command=self.open_selected_case)
-        self.btn_open_repull.pack(side=tk.RIGHT, padx=6, pady=4)
-
-        # Master Curation Toggle Button
         self._curation_expanded = False
-        self.btn_toggle_curation = ttk.Button(top_panel, text="⚙️ Curation Tools ➕", command=self.toggle_curation_deck)
-        self.btn_toggle_curation.pack(side=tk.RIGHT, padx=6, pady=4)
+        self.btn_toggle_curation = ttk.Button(btn_bar, text="⚙️ Curation ➕",
+                                              command=self.toggle_curation_deck)
 
-        # =========================================================================
-        # DEDICATED SUB-TOOLBAR ROW (Sits right above Verbatim Brief View)
-        # =========================================================================
-        self.curation_frame = ttk.Frame(self.root)
-        
-        self.btn_bookmark = ttk.Button(self.curation_frame, text="⭐ Toggle Bookmark", command=self.toggle_current_bookmark)
-        self.btn_bookmark.pack(side=tk.LEFT, padx=6, pady=4)
+        for w in (self.btn_start_crawler, self.btn_stop_crawler, self.btn_sync,
+                  self.btn_copy_log, self.btn_view_db, self.btn_open_repull,
+                  self.btn_toggle_curation):
+            w.pack(side=tk.LEFT, padx=4, pady=3)
 
-        self.btn_user_folder = ttk.Button(self.curation_frame, text="📁 Set Custom Folder", command=self.prompt_user_folder)
-        self.btn_user_folder.pack(side=tk.LEFT, padx=6, pady=4)
+        # ── Curation sub-bar (hidden by default) ─────────────────────
+        self.curation_frame = ttk.Frame(self.root, padding=(10, 2))
+        self.btn_bookmark    = ttk.Button(self.curation_frame, text="⭐ Bookmark",
+                                          command=self.toggle_current_bookmark)
+        self.btn_user_folder = ttk.Button(self.curation_frame, text="📁 Set Folder",
+                                          command=self.prompt_user_folder)
+        self.btn_delete_folder = ttk.Button(self.curation_frame, text="❌ Delete Folder",
+                                            command=self.prompt_delete_folder)
+        for w in (self.btn_bookmark, self.btn_user_folder, self.btn_delete_folder):
+            w.pack(side=tk.LEFT, padx=6, pady=2)
 
-        self.btn_delete_folder = ttk.Button(self.curation_frame, text="❌ Delete Folder", command=self.prompt_delete_folder)
-        self.btn_delete_folder.pack(side=tk.LEFT, padx=6, pady=4)
-
-        # =========================================================================
-        # MAIN BODY LAYOUT CONTAINER 
-        # =========================================================================
+        # ── Body container ────────────────────────────────────────────
         self.body_container = ttk.Frame(self.root)
-        self.body_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.body_container.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 4))
 
-        # =========================================================================
-        # INTEGRATED LOCAL AI CONSOLE PANEL (Pinned to the Bottom)
-        # =========================================================================
+        # ── Legacy Local-LLM panel (untouched, kept at bottom) ────────
         ai_frame = ttk.LabelFrame(self.body_container, text="🤖 Local LLM Insights Engine")
-        ai_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=10)
+        ai_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(8, 4))
 
-        # Row 1: Prompt Input Row
-        prompt_label = ttk.Label(ai_frame, text="Ask AI about this case:")
-        prompt_label.pack(anchor=tk.W, padx=10, pady=(5, 0))
-           
+        ttk.Label(ai_frame, text="Ask AI about this case:").pack(
+            anchor=tk.W, padx=10, pady=(5, 0))
         self.ai_prompt_entry = ttk.Entry(ai_frame, font=("Segoe UI", 10))
         self.ai_prompt_entry.pack(fill=tk.X, padx=10, pady=5)
         self.ai_prompt_entry.insert(0, "Summarize the key precedent and rulings of this case.")
 
-        # Row 2: Action Control Deck
         ai_buttons_layout = ttk.Frame(ai_frame)
         ai_buttons_layout.pack(fill=tk.X, padx=10, pady=5)
-
-        self.btn_ai_generate = ttk.Button(ai_buttons_layout, text="✨ Generate Analysis", command=self.trigger_ai_inference)
+        self.btn_ai_generate = ttk.Button(ai_buttons_layout, text="✨ Generate Analysis",
+                                          command=self.trigger_ai_inference)
         self.btn_ai_generate.pack(side=tk.LEFT, padx=2)
-
-        self.btn_ai_train = ttk.Button(ai_buttons_layout, text="⚙️ Train LLM on DB", command=self.trigger_ai_training)
+        self.btn_ai_train = ttk.Button(ai_buttons_layout, text="⚙️ Train LLM on DB",
+                                       command=self.trigger_ai_training)
         self.btn_ai_train.pack(side=tk.LEFT, padx=2)
-
-        self.btn_ai_stop = ttk.Button(ai_buttons_layout, text="🛑 Stop AI Process", command=self.abort_ai_execution)
+        self.btn_ai_stop = ttk.Button(ai_buttons_layout, text="🛑 Stop AI",
+                                      command=self.abort_ai_execution)
         self.btn_ai_stop.pack(side=tk.LEFT, padx=2)
 
-        # Row 3: Real-Time Engine Thread Status Bar
         self.ai_status_var = tk.StringVar(value="Status: Engine Idle")
-        self.ai_status_label = ttk.Label(ai_frame, textvariable=self.ai_status_var, font=("Segoe UI", 9, "italic"), foreground="gray")
-        self.ai_status_label.pack(anchor=tk.W, padx=10, pady=(0, 5))
+        ttk.Label(ai_frame, textvariable=self.ai_status_var,
+                  style="Dim.TLabel").pack(anchor=tk.W, padx=10, pady=(0, 5))
 
-        # --- Main Layout Engine (PanedWindow) ---
-        self.paned_window = tk.PanedWindow(self.root, orient=tk.VERTICAL, sashrelief=tk.RAISED)
+        # ── Main paned window ─────────────────────────────────────────
+        self.paned_window = tk.PanedWindow(
+            self.body_container, orient=tk.VERTICAL,
+            sashrelief=tk.FLAT, sashwidth=4,
+            bg=p["SEL_BG"]
+        )
         self.paned_window.pack(fill=tk.BOTH, expand=True)
-    
-        # --- Top Section (3-Column Layout: Queue + Tree Explorer + Brief Monitor) ---
-        split_canvas = ttk.Frame(self.paned_window, padding=10)
-        self.paned_window.add(split_canvas, height=500)
-    
-        # COLUMN 1: Priority Queue Tracker & API Token Controls
-        queue_frame = ttk.LabelFrame(split_canvas, text=" Network Control & Priority Targets ")
-        queue_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
-    
-        # Top Half: Priority Queue Targets Text
-        self.queue_text = tk.Text(queue_frame, width=28, height=18, wrap=tk.WORD, font=("Consolas", 10))
-        self.queue_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 10))
-        self.queue_text.insert(tk.END, "Queue empty.")
-        self.queue_text.config(state=tk.DISABLED)
-    
-        # Bottom Half: Dynamically Rendered API Key Switch Toggles
-        try:
-            cfg = cfgmod.load_config()
-            initialize_token_registry(cfg)
-    
-            api_label_frame = ttk.LabelFrame(queue_frame, text=" Live API Token Toggles ")
-            api_label_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, ipady=5)
-    
-            for token, meta in TOKEN_REGISTRY.items():
-                masked_sig = f"...{token[-6:]}" if len(token) > 6 else token
-                var = tk.BooleanVar(value=meta["enabled"])
-    
-                def make_toggle_callback(t=token, v=var):
-                    return lambda: self.execute_token_toggle(t, v)
-    
-                cb = tk.Checkbutton(
-                    api_label_frame,
-                    text=f"Key: {masked_sig}",
-                    variable=var,
-                    command=make_toggle_callback()
-                )
-                cb.pack(anchor="w", padx=10, pady=2)
-        except Exception as e:
-            ttk.Label(queue_frame, text=f"API Panel Error: {e}", foreground="red").pack(side=tk.BOTTOM)
-    
-        # Engine State Variable
-        self.active_engine = tk.StringVar(value="API")
-    
-        engine_frame = ttk.LabelFrame(queue_frame, text=" Active Ingestion Engine ")
-        engine_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, ipady=5, pady=(0, 10))
-    
-        # Radio Toggles
-        tk.Radiobutton(
-            engine_frame,
-            text="API Tracker (Live targeted fetches)",
-            variable=self.active_engine,
-            value="API",
-            command=self.switch_engine
-        ).pack(anchor="w", padx=10, pady=2)
-    
-        tk.Radiobutton(
-            engine_frame,
-            text="S3 Bulk Dump (High-volume streaming)",
-            variable=self.active_engine,
-            value="BULK",
-            command=self.switch_engine
-        ).pack(anchor="w", padx=10, pady=2)
-    
-        # COLUMN 2: CROSSOVER EXPLORER UPGRADE
-        self.explorer_frame = ttk.LabelFrame(split_canvas, text=" Crossover Library Matrix ")
-        self.explorer_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=10)
-    
-        # ARCHIVE DEEP SEARCH ENGINE BAR
-        search_frame = ttk.Frame(self.explorer_frame)
-        search_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
-    
-        ttk.Label(search_frame, text="🔍 ").pack(side=tk.LEFT)
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *args: self.refresh_case_tree())
-        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=28)
-        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Multi-Facet Hierarchical Tree List
-        self.case_tree = ttk.Treeview(self.explorer_frame, show="tree", selectmode="browse")
-        self.case_tree.column("#0", width=310, minwidth=240)
-        self.case_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.case_tree.bind("<<TreeviewSelect>>", self.on_case_tree_click)
-        self.case_tree.bind("<Double-1>", lambda e: self.open_selected_case())
-    
-        tree_scroll = ttk.Scrollbar(self.explorer_frame, command=self.case_tree.yview)
-        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.case_tree.config(yscrollcommand=tree_scroll.set)
-    
-        # COLUMN 3: Ruling Insights Brief Window
-        insights_frame = ttk.LabelFrame(split_canvas, text=" Verbatim Ruling Insights & Active Case File Brief ", padding=10)
-        insights_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-    
-        self.insights_text = tk.Text(insights_frame, wrap=tk.WORD, font=("Segoe UI", 11))
-        self.insights_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.insights_text.insert(tk.END, "Select any faceted cross-reference case from the Explorer matrix.")
-    
-        scrollbar = ttk.Scrollbar(insights_frame, command=self.insights_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.insights_text.config(yscrollcommand=scrollbar.set)
-    
-        # --- Bottom Section (Logs Console Window) ---
-        log_frame = ttk.LabelFrame(self.paned_window, text=" Live Run Details & Engine Output ", padding=10)
+
+        # ── TOP PANE: Notebook with two tabs ─────────────────────────
+        top_pane = ttk.Frame(self.paned_window, padding=4)
+        self.paned_window.add(top_pane, height=520)
+
+        self.main_notebook = ttk.Notebook(top_pane)
+        self.main_notebook.pack(fill=tk.BOTH, expand=True)
+
+        # ── TAB 1: Archive Explorer ───────────────────────────────────
+        tab_explorer = ttk.Frame(self.main_notebook, padding=4)
+        self.main_notebook.add(tab_explorer, text="  📚 Archive Explorer  ")
+        self._build_explorer_tab(tab_explorer)
+
+        # ── TAB 2: 🧠 AI Assistant ────────────────────────────────────
+        tab_ai = ttk.Frame(self.main_notebook, padding=4)
+        self.main_notebook.add(tab_ai, text="  🧠 AI Assistant  ")
+        self._build_ai_assistant_tab(tab_ai)
+
+        # ── BOTTOM PANE: Engine log ───────────────────────────────────
+        log_frame = ttk.LabelFrame(self.paned_window,
+                                   text=" Live Engine Output ", padding=6)
         self.paned_window.add(log_frame)
 
-        self.log_text = tk.Text(log_frame, wrap=tk.WORD, font=("Consolas", 10),
-                        height=10, bg="#1e1e1e", fg="#d4d4d4")
+        self.log_text = tk.Text(
+            log_frame, wrap=tk.WORD, font=("Consolas", 10),
+            height=10, bg="#12121e", fg="#c9cfe8",
+            insertbackground="#c9cfe8", relief="flat", borderwidth=0
+        )
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.log_text.bind("<Key>", lambda e: "break")
 
-        # Color tags
-        self.log_text.tag_config("error", foreground="#ff5252", font=("Consolas", 10, "bold"))
+        self.log_text.tag_config("error",   foreground="#ff5252",
+                                 font=("Consolas", 10, "bold"))
         self.log_text.tag_config("warning", foreground="#ffb300")
-        self.log_text.tag_config("info", foreground="#4baffa")
-        self.log_text.tag_config("success", foreground="#2ecc71", font=("Consolas", 10, "bold"))
-        self.log_text.tag_config("system", foreground="#888888")
-
+        self.log_text.tag_config("info",    foreground="#4baffa")
+        self.log_text.tag_config("success", foreground="#2ecc71",
+                                 font=("Consolas", 10, "bold"))
+        self.log_text.tag_config("system",  foreground="#666888")
         self.log_text.insert(tk.END, "[System Idle] Ready to stream updates.\n")
 
         log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=log_scroll.set)
-        
-        def log_to_live_engine(self, text_string):
-            def append_action():
-                console_tag = "info"
-                if "❌" in text_string or "Error" in text_string:
-                    console_tag = "error"
-                elif "⚠️" in text_string or "Warning" in text_string:
-                    console_tag = "warning"
-                elif "✅" in text_string or "💾" in text_string:
-                    console_tag = "success"
-                elif "🛑" in text_string:
-                    console_tag = "system"
-        
-                self.log_text.config(state=tk.NORMAL)
-                self.log_text.insert(tk.END, f"\n[AI Engine] {text_string}", console_tag)
-                self.log_text.see(tk.END)
-                self.log_text.config(state=tk.DISABLED)
 
-            self.root.after(0, append_action)
+    # -----------------------------------------------------------------
+    # TAB BUILDERS
+    # -----------------------------------------------------------------
+
+    def _build_explorer_tab(self, parent):
+        """3-column layout: queue/control | tree | brief panel."""
+        p = self._pal
+
+        # COLUMN 1: Priority Queue + token controls
+        queue_frame = ttk.LabelFrame(parent, text=" Network Control & Priority Targets ")
+        queue_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
+
+        self.queue_text = self._make_text(queue_frame, width=28, height=18,
+                                          font=("Consolas", 10))
+        self.queue_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 6))
+        self.queue_text.insert(tk.END, "Queue empty.")
+        self.queue_text.config(state=tk.DISABLED)
+
+        try:
+            cfg = cfgmod.load_config()
+            initialize_token_registry(cfg)
+            api_label_frame = ttk.LabelFrame(queue_frame, text=" Live API Token Toggles ")
+            api_label_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, ipady=4)
+            for token, meta in TOKEN_REGISTRY.items():
+                masked_sig = f"...{token[-6:]}" if len(token) > 6 else token
+                var = tk.BooleanVar(value=meta["enabled"])
+                def make_toggle_callback(t=token, v=var):
+                    return lambda: self.execute_token_toggle(t, v)
+                tk.Checkbutton(
+                    api_label_frame,
+                    text=f"Key: {masked_sig}",
+                    variable=var,
+                    command=make_toggle_callback(),
+                    bg=p["PANEL"], fg=p["FG"],
+                    selectcolor=p["SEL_BG"],
+                    activebackground=p["PANEL"],
+                    relief="flat", font=("Segoe UI", 9),
+                ).pack(anchor="w", padx=10, pady=2)
+        except Exception as e:
+            ttk.Label(queue_frame, text=f"API Panel Error: {e}",
+                      foreground="#ff5252").pack(side=tk.BOTTOM)
+
+        self.active_engine = tk.StringVar(value="API")
+        engine_frame = ttk.LabelFrame(queue_frame, text=" Active Ingestion Engine ")
+        engine_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, ipady=4, pady=(0, 8))
+        rb_kw = dict(bg=p["PANEL"], fg=p["FG"], selectcolor=p["SEL_BG"],
+                     activebackground=p["PANEL"], relief="flat",
+                     font=("Segoe UI", 9))
+        tk.Radiobutton(engine_frame, text="API Tracker (Live targeted fetches)",
+                       variable=self.active_engine, value="API",
+                       command=self.switch_engine, **rb_kw).pack(anchor="w", padx=10, pady=2)
+        tk.Radiobutton(engine_frame, text="S3 Bulk Dump (High-volume streaming)",
+                       variable=self.active_engine, value="BULK",
+                       command=self.switch_engine, **rb_kw).pack(anchor="w", padx=10, pady=2)
+
+        # COLUMN 2: Case tree with search bar
+        self.explorer_frame = ttk.LabelFrame(parent, text=" Crossover Library Matrix ")
+        self.explorer_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=8)
+
+        search_frame = ttk.Frame(self.explorer_frame)
+        search_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+        ttk.Label(search_frame, text="🔍").pack(side=tk.LEFT, padx=(0, 4))
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_: self.refresh_case_tree())
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=28)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.case_tree = ttk.Treeview(self.explorer_frame, show="tree", selectmode="browse")
+        self.case_tree.column("#0", width=310, minwidth=240)
+        self.case_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.case_tree.bind("<<TreeviewSelect>>", self.on_case_tree_click)
+        self.case_tree.bind("<Double-1>", lambda e: self.open_selected_case())
+
+        tree_scroll = ttk.Scrollbar(self.explorer_frame, command=self.case_tree.yview)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.case_tree.config(yscrollcommand=tree_scroll.set)
+
+        # COLUMN 3: Brief panel
+        insights_frame = ttk.LabelFrame(parent,
+                                        text=" Verbatim Ruling Insights & Case Brief ",
+                                        padding=8)
+        insights_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self.insights_text = self._make_text(insights_frame, wrap=tk.WORD,
+                                             font=("Segoe UI", 11))
+        self.insights_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.insights_text.insert(tk.END,
+            "Select a case from the Explorer matrix to view its brief.")
+
+        ins_scroll = ttk.Scrollbar(insights_frame, command=self.insights_text.yview)
+        ins_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.insights_text.config(yscrollcommand=ins_scroll.set)
+
+    def _build_ai_assistant_tab(self, parent):
+        """Full LLM-powered search / ask / analyse panel."""
+        p = self._pal
+
+        # ── Left sidebar: mode + quick actions ───────────────────────
+        sidebar = ttk.LabelFrame(parent, text=" Actions ", padding=8)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        ttk.Label(sidebar, text="Ask / Search", font=("Segoe UI", 9, "bold")).pack(
+            anchor=tk.W, pady=(0, 4))
+
+        ttk.Button(sidebar, text="🔍 Search Archive",
+                   style="Accent.TButton",
+                   command=self._ai_search).pack(fill=tk.X, pady=2)
+        ttk.Button(sidebar, text="❓ Ask a Question",
+                   command=self._ai_ask).pack(fill=tk.X, pady=2)
+        ttk.Button(sidebar, text="📑 Semantic Search",
+                   command=self._ai_semantic).pack(fill=tk.X, pady=2)
+
+        ttk.Separator(sidebar, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        ttk.Label(sidebar, text="Analyse Selected Case",
+                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 4))
+
+        for label, instr in [
+            ("📋 Summarise",        "Provide a concise summary of the case: key facts, issue, holding, and reasoning."),
+            ("⚖️ Key Issues",       "List and explain every major legal issue raised and how the court resolved each."),
+            ("🔍 Find Weaknesses",  "Identify the weakest arguments in the majority opinion and any notable dissents."),
+            ("🔗 Qualified Immunity","Analyse this case in the context of the qualified immunity doctrine."),
+            ("📝 IRAC Outline",     "Produce a full IRAC outline (Issue, Rule, Application, Conclusion) for this case."),
+        ]:
+            btn = ttk.Button(sidebar, text=label,
+                             command=lambda i=instr: self._ai_analyse(i))
+            btn.pack(fill=tk.X, pady=2)
+
+        ttk.Separator(sidebar, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        ttk.Button(sidebar, text="🛑 Stop",
+                   command=self._ai_stop).pack(fill=tk.X, pady=2)
+        ttk.Button(sidebar, text="🗑 Clear Output",
+                   command=self._ai_clear_output).pack(fill=tk.X, pady=2)
+
+        # ── Right panel: prompt + output ──────────────────────────────
+        right = ttk.Frame(parent, padding=0)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Prompt row
+        prompt_frame = ttk.LabelFrame(right, text=" Prompt ", padding=6)
+        prompt_frame.pack(fill=tk.X, pady=(0, 6))
+
+        self.ai_query_text = self._make_text(prompt_frame, height=3, wrap=tk.WORD)
+        self.ai_query_text.pack(fill=tk.X, expand=True, side=tk.LEFT)
+        self.ai_query_text.insert(tk.END, "Type your question or instruction here…")
+        self.ai_query_text.bind("<FocusIn>",  self._ai_prompt_focus_in)
+        self.ai_query_text.bind("<FocusOut>", self._ai_prompt_focus_out)
+
+        run_btn = ttk.Button(prompt_frame, text="▶ Run",
+                             style="Accent.TButton",
+                             command=self._ai_run_custom)
+        run_btn.pack(side=tk.RIGHT, padx=(8, 0))
+
+        # Status bar
+        self._ai_status = tk.StringVar(value="Ready — configure LLM_API_KEY env var and llm.model in config.yaml")
+        status_bar = ttk.Label(right, textvariable=self._ai_status, style="Dim.TLabel")
+        status_bar.pack(anchor=tk.W, pady=(0, 4))
+
+        # Output pane
+        out_frame = ttk.LabelFrame(right, text=" Output ", padding=6)
+        out_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.ai_output = self._make_text(out_frame, wrap=tk.WORD, font=("Segoe UI", 11))
+        self.ai_output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.ai_output.tag_config("heading",  foreground=p["ACCENT"],
+                                  font=("Segoe UI", 11, "bold"))
+        self.ai_output.tag_config("source",   foreground=p["ACCENT2"],
+                                  font=("Segoe UI", 10))
+        self.ai_output.tag_config("dim",      foreground=p["FG_DIM"],
+                                  font=("Segoe UI", 9, "italic"))
+        self.ai_output.tag_config("error",    foreground="#ff5252",
+                                  font=("Segoe UI", 10, "bold"))
+        self.ai_output.tag_config("body",     foreground=p["FG"])
+        self.ai_output.insert(tk.END,
+            "← Use the action buttons or type a custom prompt and press ▶ Run.\n\n"
+            "Tip: select a case in the Archive Explorer tab first, then click any "
+            "'Analyse Selected Case' button to interrogate it directly.\n",
+            "dim")
+
+        out_scroll = ttk.Scrollbar(out_frame, command=self.ai_output.yview)
+        out_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.ai_output.config(yscrollcommand=out_scroll.set)
+
+        # Copy-output button row
+        copy_row = ttk.Frame(right, padding=(0, 4, 0, 0))
+        copy_row.pack(fill=tk.X)
+        ttk.Button(copy_row, text="📋 Copy Output",
+                   command=self._ai_copy_output).pack(side=tk.LEFT)
+        self._ai_busy = False
+
+    # -----------------------------------------------------------------
+    # AI ASSISTANT — prompt helpers
+    # -----------------------------------------------------------------
+
+    _AI_PLACEHOLDER = "Type your question or instruction here…"
+
+    def _ai_prompt_focus_in(self, _event=None):
+        if self.ai_query_text.get("1.0", tk.END).strip() == self._AI_PLACEHOLDER:
+            self.ai_query_text.delete("1.0", tk.END)
+
+    def _ai_prompt_focus_out(self, _event=None):
+        if not self.ai_query_text.get("1.0", tk.END).strip():
+            self.ai_query_text.insert("1.0", self._AI_PLACEHOLDER)
+
+    def _ai_get_prompt(self) -> str:
+        txt = self.ai_query_text.get("1.0", tk.END).strip()
+        return "" if txt == self._AI_PLACEHOLDER else txt
+
+    def _ai_set_status(self, msg: str):
+        self.root.after(0, self._ai_status.set, msg)
+
+    def _ai_append(self, text: str, tag: str = "body"):
+        """Thread-safe append to the output pane."""
+        def _do():
+            self.ai_output.config(state=tk.NORMAL)
+            self.ai_output.insert(tk.END, text, tag)
+            self.ai_output.see(tk.END)
+            self.ai_output.config(state=tk.DISABLED)
+        self.root.after(0, _do)
+
+    def _ai_clear_output(self):
+        self.ai_output.config(state=tk.NORMAL)
+        self.ai_output.delete("1.0", tk.END)
+        self.ai_output.config(state=tk.DISABLED)
+        self._ai_status.set("Output cleared.")
+
+    def _ai_copy_output(self):
+        content = self.ai_output.get("1.0", tk.END).strip()
+        if content:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self._ai_status.set("Output copied to clipboard.")
+
+    def _ai_stop(self):
+        self._ai_busy = False
+        self._ai_set_status("Stopped.")
+
+    def _ai_guard(self) -> bool:
+        """Return True if we can start a new request; set status and return False if busy."""
+        if self._ai_busy:
+            self._ai_set_status("⏳ A request is already running. Wait or press Stop.")
+            return False
+        if not self.db_path or not os.path.exists(self.db_path):
+            self._ai_set_status("❌ Database not found. Ingest cases first.")
+            return False
+        return True
+
+    # -----------------------------------------------------------------
+    # AI ASSISTANT — action handlers
+    # -----------------------------------------------------------------
+
+    def _ai_ask(self):
+        prompt = self._ai_get_prompt()
+        if not prompt:
+            self._ai_set_status("Enter a question in the prompt box first.")
+            return
+        if not self._ai_guard():
+            return
+        self._ai_busy = True
+        self._ai_set_status("⏳ Querying LLM…")
+        threading.Thread(target=self._ai_worker_ask, args=(prompt,), daemon=True).start()
+
+    def _ai_search(self):
+        prompt = self._ai_get_prompt()
+        if not prompt:
+            self._ai_set_status("Enter search terms in the prompt box first.")
+            return
+        if not self._ai_guard():
+            return
+        self._ai_busy = True
+        self._ai_set_status("⏳ Searching archive…")
+        threading.Thread(target=self._ai_worker_ask, args=(prompt,), daemon=True).start()
+
+    def _ai_semantic(self):
+        prompt = self._ai_get_prompt()
+        if not prompt:
+            self._ai_set_status("Enter a query in the prompt box first.")
+            return
+        if not self._ai_guard():
+            return
+        self._ai_busy = True
+        self._ai_set_status("⏳ Running semantic search…")
+        threading.Thread(target=self._ai_worker_semantic, args=(prompt,), daemon=True).start()
+
+    def _ai_analyse(self, instruction: str):
+        doc_id = self.get_selected_doc_id()
+        if not doc_id:
+            self._ai_set_status("Select a case in the Archive Explorer tab first.")
+            return
+        if not self._ai_guard():
+            return
+        self._ai_busy = True
+        self._ai_set_status(f"⏳ Analysing case {doc_id[:12]}…")
+        threading.Thread(target=self._ai_worker_analyse,
+                         args=(doc_id, instruction), daemon=True).start()
+
+    def _ai_run_custom(self):
+        prompt = self._ai_get_prompt()
+        if not prompt:
+            self._ai_set_status("Enter a prompt first.")
+            return
+        doc_id = self.get_selected_doc_id()
+        if doc_id:
+            # Has a selected case → treat as case analysis with the custom instruction
+            if not self._ai_guard():
+                return
+            self._ai_busy = True
+            self._ai_set_status(f"⏳ Running custom prompt on case {doc_id[:12]}…")
+            threading.Thread(target=self._ai_worker_analyse,
+                             args=(doc_id, prompt), daemon=True).start()
+        else:
+            # No case selected → treat as archive question
+            if not self._ai_guard():
+                return
+            self._ai_busy = True
+            self._ai_set_status("⏳ Running custom prompt against archive…")
+            threading.Thread(target=self._ai_worker_ask,
+                             args=(prompt,), daemon=True).start()
+
+    # -----------------------------------------------------------------
+    # AI ASSISTANT — background workers
+    # -----------------------------------------------------------------
+
+    def _ai_worker_ask(self, question: str):
+        try:
+            answer, sources = query_cases(self.db_path, question)
+            self._ai_append(f"\n{'━'*60}\n", "dim")
+            self._ai_append(f"❓ {question}\n\n", "heading")
+            self._ai_append(answer + "\n", "body")
+            if sources:
+                self._ai_append("\n── Sources ──────────────────────────────────\n", "dim")
+                for s in sources:
+                    label = s.get("ref_no") or (s["doc_id"][:12] + "…")
+                    folder = s.get("virtual_folder") or "Uncategorized"
+                    url = s.get("source_url") or ""
+                    line = f"  • {label}  |  {folder}"
+                    if url:
+                        line += f"\n    {url}"
+                    self._ai_append(line + "\n", "source")
+            self._ai_set_status(f"✅ Done — {len(sources)} source(s) cited.")
+        except Exception as exc:
+            self._ai_append(f"\n❌ Error: {exc}\n", "error")
+            self._ai_set_status(f"❌ Error: {exc}")
+        finally:
+            self._ai_busy = False
+
+    def _ai_worker_semantic(self, query: str):
+        try:
+            results = semantic_search(self.db_path, query)
+            self._ai_append(f"\n{'━'*60}\n", "dim")
+            self._ai_append(f"🔍 Semantic Search: {query}\n\n", "heading")
+            if not results:
+                self._ai_append("No relevant cases found.\n", "body")
+            else:
+                for i, r in enumerate(results, 1):
+                    label = r.get("ref_no") or (r["doc_id"][:12] + "…")
+                    folder = r.get("virtual_folder") or "Uncategorized"
+                    note = r.get("relevance_note", "")
+                    snippet = r.get("snippet", "")
+                    self._ai_append(f"[{i}] {label}  —  {folder}\n", "source")
+                    if note:
+                        self._ai_append(f"    {note}\n", "dim")
+                    if snippet:
+                        self._ai_append(f'    "{snippet[:200]}…"\n', "body")
+                    self._ai_append("\n", "body")
+            self._ai_set_status(f"✅ Done — {len(results)} result(s).")
+        except Exception as exc:
+            self._ai_append(f"\n❌ Error: {exc}\n", "error")
+            self._ai_set_status(f"❌ Error: {exc}")
+        finally:
+            self._ai_busy = False
+
+    def _ai_worker_analyse(self, doc_id: str, instruction: str):
+        try:
+            result = analyze_case(self.db_path, doc_id, instruction)
+            self._ai_append(f"\n{'━'*60}\n", "dim")
+            self._ai_append(f"⚖️ Case: {doc_id[:12]}…\n", "heading")
+            self._ai_append(f"📋 {instruction}\n\n", "dim")
+            self._ai_append(result + "\n", "body")
+            self._ai_set_status("✅ Analysis complete.")
+        except Exception as exc:
+            self._ai_append(f"\n❌ Error: {exc}\n", "error")
+            self._ai_set_status(f"❌ Error: {exc}")
+        finally:
+            self._ai_busy = False
 
         
     def abort_ai_execution(self):
@@ -510,6 +909,25 @@ class LegalSorterApp:
         self.btn_ai_generate.config(state=tk.NORMAL)
         
         self.log_to_live_engine("🛑 Interrupt sequence fired. Engine shutting down...")
+
+    def log_to_live_engine(self, text_string: str):
+        """Append a message to the live engine console panel (thread-safe)."""
+        def append_action():
+            if "❌" in text_string or "Error" in text_string:
+                console_tag = "error"
+            elif "⚠️" in text_string or "Warning" in text_string:
+                console_tag = "warning"
+            elif "✅" in text_string or "💾" in text_string:
+                console_tag = "success"
+            elif "🛑" in text_string:
+                console_tag = "system"
+            else:
+                console_tag = "info"
+            self.log_text.config(state=tk.NORMAL)
+            self.log_text.insert(tk.END, f"\n[AI Engine] {text_string}", console_tag)
+            self.log_text.see(tk.END)
+            self.log_text.config(state=tk.DISABLED)
+        self.root.after(0, append_action)
 
     def trigger_ai_inference(self):
         """Prepares state counters and kicks off async token derivation."""
@@ -761,7 +1179,7 @@ class LegalSorterApp:
         """Queries database stats and triggers visual synchronization loops."""
         self.discover_database_path()
         if not os.path.exists(self.db_path):
-            self.stat_indexed.config(text=" Total Indexed: DB Not Found")
+            self.stat_indexed.config(text="📂 Indexed: DB Not Found")
             return
 
         try:
@@ -782,14 +1200,14 @@ class LegalSorterApp:
 
             cursor.execute("SELECT COUNT(*) FROM documents")
             total_indexed = cursor.fetchone()[0]
-            self.stat_indexed.config(text=f" Total Indexed: {total_indexed}")
+            self.stat_indexed.config(text=f"📂 Indexed: {total_indexed}")
 
             size_mb = os.path.getsize(self.db_path) / (1024 * 1024)
-            self.stat_size.config(text=f" Storage Footprint: {size_mb:.2f} MB")
+            self.stat_size.config(text=f"💾 {size_mb:.2f} MB")
 
             cursor.execute("SELECT COUNT(*) FROM priority_queue WHERE status='pending'")
             pending_total = cursor.fetchone()[0]
-            self.stat_queue.config(text=f" Pending Queue: {pending_total}")
+            self.stat_queue.config(text=f"⏳ Queue: {pending_total}")
 
             self.queue_text.config(state=tk.NORMAL)
             self.queue_text.delete("1.0", tk.END)
@@ -1073,7 +1491,7 @@ class LegalSorterApp:
             elapsed = int(time.time() - self.session_start_time)
             hours, remainder = divmod(elapsed, 3600)
             minutes, seconds = divmod(remainder, 60)
-            self.stat_timer.config(text=f" Run Time: {hours:02d}:{minutes:02d}:{seconds:02d}")
+            self.stat_timer.config(text=f"⏱ {hours:02d}:{minutes:02d}:{seconds:02d}")
             self.root.after(1000, self.update_visual_timer)
 
     def start_crawler(self):
@@ -1370,7 +1788,7 @@ class LegalSorterApp:
             self.crawler_process = None
             self.session_start_time = None
             
-            self.stat_timer.config(text=" Run Time: Stopped", foreground="gray")
+            self.stat_timer.config(text="⏱ Stopped", foreground="gray")
             self.write_to_engine_log("\n Engine safely halted. Standing by.\n")
             
             self.btn_start_crawler.config(state=tk.NORMAL)
