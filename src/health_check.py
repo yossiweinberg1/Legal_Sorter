@@ -48,13 +48,13 @@ def _check_imports() -> tuple[bool, str]:
     return True, "All required imports resolved."
 
 
-def _check_config_and_db() -> tuple[bool, str]:
-    cfgmod._CONFIG_CACHE = None
-    cfg = cfgmod.load_config()
-    required = ("pull_folder", "index_folder", "pending_folder")
-    missing_keys = [k for k in required if not cfg.get(k)]
-    if missing_keys:
-        return False, f"Missing config keys: {', '.join(missing_keys)}"
+def _check_config_and_db(strict: bool = False) -> tuple[bool, str]:
+    cfgmod._CONFIG_CACHE = {}
+    try:
+        cfg = cfgmod.load_config(strict=strict)
+    except Exception as exc:
+        return False, f"Config validation failed: {exc}"
+    required = cfgmod.REQUIRED_DIR_KEYS
 
     for key in required:
         path = Path(cfg[key])
@@ -84,16 +84,52 @@ def _check_config_and_db() -> tuple[bool, str]:
         msg += " COURTLISTENER_API_TOKEN(S) not set."
     if not llm_ok:
         msg += " LLM_API_KEY not set (only needed for cloud LLM mode)."
+    warnings = cfg.get("_warnings", [])
+    if warnings:
+        msg += " Warnings: " + "; ".join(warnings)
     return True, msg
 
 
-def run_health_check() -> int:
-    print("== Legal Sorter Health Check ==")
+def _check_production_baseline() -> tuple[bool, str]:
+    cfgmod._CONFIG_CACHE = {}
+    try:
+        cfg = cfgmod.load_config(strict=True)
+    except Exception as exc:
+        return False, f"Strict production validation failed: {exc}"
+
+    prod = cfg.get("production", {})
+    audit_log_path = Path(str(prod.get("audit_log_path", "logs/audit.log")))
+    try:
+        audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return False, f"Cannot create audit log directory: {exc}"
+
+    backup_folder = Path(str(prod.get("backup_folder", "")))
+    if not backup_folder.exists() or not backup_folder.is_dir():
+        return False, f"Backup folder is invalid: {backup_folder}"
+    if not os.access(backup_folder, os.W_OK):
+        return False, f"Backup folder is not writable: {backup_folder}"
+    quarantine_folder = Path(str(prod.get("quarantine_folder", "")))
+    if not quarantine_folder.exists() or not quarantine_folder.is_dir():
+        return False, f"Quarantine folder is invalid: {quarantine_folder}"
+    if not os.access(quarantine_folder, os.W_OK):
+        return False, f"Quarantine folder is not writable: {quarantine_folder}"
+
+    enabled = bool(prod.get("enabled", False))
+    status = "enabled" if enabled else "configured (disabled)"
+    return True, f"Production baseline is {status}."
+
+
+def run_health_check(strict: bool = False) -> int:
+    mode = "READINESS" if strict else "HEALTH"
+    print(f"== Legal Sorter {mode} Check ==")
     checks = [
         ("Python", _check_python),
         ("Dependencies", _check_imports),
-        ("Config + Database", _check_config_and_db),
+        ("Config + Database", lambda: _check_config_and_db(strict=strict)),
     ]
+    if strict:
+        checks.append(("Production Baseline", _check_production_baseline))
 
     has_failure = False
     for label, fn in checks:

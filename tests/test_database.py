@@ -38,6 +38,29 @@ class DatabaseTests(unittest.TestCase):
         self.assertGreaterEqual(len(results), 1)
         self.assertEqual(results[0]["id"], doc_id)
 
+    def test_ingestion_job_lifecycle(self):
+        self.db.upsert_ingestion_job(
+            job_id="job-1",
+            source_path="/tmp/file.pdf",
+            source_url="https://example.com/file",
+            state="queued",
+            source_fingerprint="fingerprint-1",
+        )
+        self.db.upsert_ingestion_job(
+            job_id="job-1",
+            source_path="/tmp/file.pdf",
+            source_url="https://example.com/file",
+            state="processing",
+            source_fingerprint="fingerprint-1",
+            increment_attempt=True,
+        )
+        job = self.db.get_ingestion_job("job-1")
+        self.assertEqual(job["state"], "processing")
+        self.assertEqual(job["attempts"], 1)
+
+        jobs = self.db.list_ingestion_jobs(limit=5)
+        self.assertEqual(jobs[0]["job_id"], "job-1")
+
 
 if __name__ == "__main__":
     unittest.main()

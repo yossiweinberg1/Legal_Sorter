@@ -1,0 +1,22 @@
+services:
+  legal-sorter-web:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      LEGAL_SORTER_PULL_FOLDER: /data/pull
+      LEGAL_SORTER_INDEX_FOLDER: /data/index
+      LEGAL_SORTER_PENDING_FOLDER: /data/pending
+      LEGAL_SORTER_BACKUP_FOLDER: /data/backups
+      LEGAL_SORTER_QUARANTINE_FOLDER: /data/quarantine
+      LEGAL_SORTER_AUDIT_LOG_PATH: /app/logs/audit.log
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./data/pull:/data/pull
+      - ./data/index:/data/index
+      - ./data/pending:/data/pending
+      - ./data/backups:/data/backups
+      - ./data/quarantine:/data/quarantine
+      - ./logs:/app/logs

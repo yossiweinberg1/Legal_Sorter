@@ -22,11 +22,12 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Depends, Header
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from src import config as cfgmod
+from src import audit as auditlog
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -58,6 +59,34 @@ class IngestRequest(BaseModel):
     label: str = ""  # optional human-readable label / case name
 
 
+ROLE_ORDER = {"anonymous": 0, "reader": 1, "operator": 2, "admin": 3}
+
+
+def _cfg() -> dict:
+    return cfgmod.load_config()
+
+
+def _principal(required_role: str):
+    def dependency(x_api_key: str | None = Header(default=None, alias="X-API-Key")):
+        cfg = _cfg()
+        auth_cfg = cfg.get("auth", {})
+        if not auth_cfg.get("enabled"):
+            return {"actor": "anonymous", "role": "anonymous"}
+        for entry in auth_cfg.get("api_keys", []):
+            if x_api_key and x_api_key == entry.get("key"):
+                role = str(entry.get("role", "reader"))
+                if ROLE_ORDER.get(role, 0) < ROLE_ORDER.get(required_role, 0):
+                    raise HTTPException(status_code=403, detail="Insufficient role for this endpoint.")
+                return {"actor": f"api_key:{role}", "role": role}
+        raise HTTPException(status_code=401, detail="Missing or invalid API key.")
+    return dependency
+
+
+require_reader = _principal("reader")
+require_operator = _principal("operator")
+require_admin = _principal("admin")
+
+
 # ---------------------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------------------
@@ -66,6 +95,7 @@ class IngestRequest(BaseModel):
 def search(
     q: str = Query(..., description="Search query — supports FTS5 phrases and AND/OR"),
     limit: int = Query(default=20, le=100),
+    principal: dict = Depends(require_reader),
 ):
     """Full-text search across all indexed cases.
 
@@ -79,13 +109,14 @@ def search(
         from src.database import DB
         db = DB(_db_path())
         results = db.fts_search(q.strip(), limit=limit)
+        auditlog.log_event(_cfg(), "api.search", actor=principal["actor"], role=principal["role"], details={"query": q.strip(), "limit": limit, "count": len(results)})
         return {"query": q, "count": len(results), "results": results}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/case/{doc_id}", tags=["Cases"])
-def get_case(doc_id: str):
+def get_case(doc_id: str, principal: dict = Depends(require_reader)):
     """Retrieve full metadata and text for a single indexed case."""
     try:
         with sqlite3.connect(_db_path()) as conn:
@@ -108,7 +139,7 @@ def get_case(doc_id: str):
         except Exception:
             return []
 
-    return {
+    result = {
         "id": row[0],
         "ref_no": row[1],
         "virtual_folder": row[2],
@@ -120,6 +151,8 @@ def get_case(doc_id: str):
         "preview": (row[8] or "").replace("\n", " ").strip(),
         "added_at": row[9],
     }
+    auditlog.log_event(_cfg(), "api.case", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "ref_no": row[1]})
+    return result
 
 
 @app.get("/api/cases", tags=["Cases"])
@@ -127,6 +160,7 @@ def list_cases(
     folder: Optional[str] = Query(default=None, description="Filter by virtual_folder prefix"),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
+    principal: dict = Depends(require_reader),
 ):
     """List indexed cases, optionally filtered by virtual folder."""
     try:
@@ -147,7 +181,7 @@ def list_cases(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {
+    result = {
         "count": len(rows),
         "offset": offset,
         "results": [
@@ -161,10 +195,12 @@ def list_cases(
             for r in rows
         ],
     }
+    auditlog.log_event(_cfg(), "api.cases", actor=principal["actor"], role=principal["role"], details={"folder": folder, "limit": limit, "offset": offset, "count": len(rows)})
+    return result
 
 
 @app.post("/api/ask", tags=["AI"])
-def ask(body: AskRequest):
+def ask(body: AskRequest, principal: dict = Depends(require_reader)):
     """Ask a legal question. The AI answers using only the indexed cases as context.
 
     Requires LLM_API_KEY environment variable (or a local Ollama endpoint in config.yaml).
@@ -172,7 +208,15 @@ def ask(body: AskRequest):
     try:
         from src.legal_ai import query_cases
         answer, sources = query_cases(_db_path(), body.question, top_k=body.top_k)
-        return {"answer": answer, "sources": sources}
+        auditlog.log_event(_cfg(), "api.ask", actor=principal["actor"], role=principal["role"], details={"question": body.question[:250], "top_k": body.top_k, "sources": len(sources)})
+        return {
+            "answer": answer,
+            "sources": sources,
+            "diagnostics": {
+                "grounded_source_count": len(sources),
+                "grounded": "[SOURCE " in answer,
+            },
+        }
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"LLM error: {exc}") from exc
     except Exception as exc:
@@ -180,7 +224,7 @@ def ask(body: AskRequest):
 
 
 @app.get("/api/stats", tags=["Info"])
-def stats():
+def stats(principal: dict = Depends(require_reader)):
     """Return basic statistics about the indexed archive."""
     try:
         with sqlite3.connect(_db_path()) as conn:
@@ -194,11 +238,13 @@ def stats():
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {
+    result = {
         "total_cases": total,
         "top_folders": [{"folder": r[0], "count": r[1]} for r in folders],
         "recently_added": [{"ref_no": r[0], "folder": r[1], "added_at": r[2]} for r in latest],
     }
+    auditlog.log_event(_cfg(), "api.stats", actor=principal["actor"], role=principal["role"], details={"total_cases": total})
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +252,7 @@ def stats():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/ingest", tags=["Ingest"])
-def ingest(body: IngestRequest):
+def ingest(body: IngestRequest, principal: dict = Depends(require_operator)):
     """Accept raw legal text (any size), run the full pipeline, and store results.
 
     Steps performed for each submitted blob:
@@ -230,10 +276,10 @@ def ingest(body: IngestRequest):
     if not segments:
         segments = [raw]
 
+    cfg = _cfg()
     try:
         from src.database import DB
         from src import watcher as watchermod
-        cfg = cfgmod.load_config()
         db = DB(_db_path())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Database init error: {exc}") from exc
@@ -300,13 +346,56 @@ def ingest(body: IngestRequest):
                 status_code=500, detail=f"Ingest pipeline error: {exc}"
             ) from exc
 
-    return {
+    result = {
         "segments_submitted": len(segments),
         "stored": len(stored),
         "duplicates_skipped": len(duplicates),
         "new_records": stored,
         "duplicate_refs": duplicates,
     }
+    auditlog.log_event(cfg, "api.ingest", actor=principal["actor"], role=principal["role"], details={"segments_submitted": len(segments), "stored": len(stored), "duplicates_skipped": len(duplicates), "label": body.label[:120]})
+    return result
+
+
+@app.get("/api/admin/jobs", tags=["Admin"])
+def admin_jobs(
+    state: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, le=200),
+    principal: dict = Depends(require_admin),
+):
+    from src.database import DB
+    db = DB(_db_path())
+    jobs = db.list_ingestion_jobs(state=state, limit=limit)
+    auditlog.log_event(_cfg(), "admin.jobs", actor=principal["actor"], role=principal["role"], details={"state": state, "limit": limit, "count": len(jobs)})
+    return {"count": len(jobs), "jobs": jobs}
+
+
+@app.post("/api/admin/replay/{job_id}", tags=["Admin"])
+def admin_replay(job_id: str, principal: dict = Depends(require_admin)):
+    from src.database import DB
+    from src import watcher as watchermod
+    cfg = _cfg()
+    db = DB(_db_path())
+    job = watchermod.replay_quarantined_job(cfg, db, job_id)
+    auditlog.log_event(cfg, "admin.replay", actor=principal["actor"], role=principal["role"], details={"job_id": job_id, "state": job.get("state")})
+    return job
+
+
+@app.get("/api/admin/audit", tags=["Admin"])
+def admin_audit(limit: int = Query(default=100, le=500), principal: dict = Depends(require_admin)):
+    cfg = _cfg()
+    events = auditlog.read_events(cfg, limit=limit)
+    auditlog.log_event(cfg, "admin.audit", actor=principal["actor"], role=principal["role"], details={"limit": limit, "count": len(events)})
+    return {"count": len(events), "events": events}
+
+
+@app.get("/api/admin/backups", tags=["Admin"])
+def admin_backups(limit: int = Query(default=20, le=100), principal: dict = Depends(require_admin)):
+    from src.database import DB
+    db = DB(_db_path())
+    backups = db.list_backups(limit=limit)
+    auditlog.log_event(_cfg(), "admin.backups", actor=principal["actor"], role=principal["role"], details={"limit": limit, "count": len(backups)})
+    return {"count": len(backups), "backups": backups}
 
 
 # ---------------------------------------------------------------------------

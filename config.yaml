@@ -27,4 +27,27 @@ llm:
   base_url: "https://api.openai.com/v1"
   api_key: ""             # override with LLM_API_KEY env var
   model: "gpt-4o-mini"
+  fast_model: "gpt-4o-mini"
+  accurate_model: "gpt-4o-mini"
   max_context_chars: 12000  # chars of case text sent per RAG query
+  require_citations: true
+  min_sources: 1
+  timeout_seconds: 60
+
+auth:
+  enabled: false
+  api_keys: []
+
+production:
+  enabled: false
+  support_email: ""
+  backup_folder: ""
+  audit_log_path: "logs/audit.log"
+  quarantine_folder: "quarantine"
+  retention_days: 365
+  telemetry_enabled: false
+  quality_gate:
+    citation_f1_min: 0.70
+    entity_f1_min: 0.60
+    min_cases: 1
+    baseline_file: "tests/fixtures/gold_baseline.json"

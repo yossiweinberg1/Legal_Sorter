@@ -34,6 +34,8 @@ for potentially thousands of cases, not the PDFs themselves.
 
 ## Setup
 
+Need the owner/operator version of setup? See `README_OWNER_SETUP.md`.
+
 ### 1. Install Python packages
 ```
 pip install -r requirements.txt
@@ -61,6 +63,32 @@ This creates `.venv`, installs dependencies, and runs a local health check.
 - `keep_if_no_repull_source` — leave `true` (default) unless you're fine
   losing files with no known online source.
 - On Linux/macOS, replace the default Windows-style paths with local absolute paths.
+- Optional production-readiness block (recommended before selling):
+  ```yaml
+  production:
+    enabled: false
+    support_email: "support@yourdomain.com"
+    backup_folder: "/absolute/path/to/backups"
+    audit_log_path: "logs/audit.log"
+    quarantine_folder: "/absolute/path/to/quarantine"
+    retention_days: 365
+    quality_gate:
+      citation_f1_min: 0.70
+      entity_f1_min: 0.60
+      min_cases: 1
+      baseline_file: "tests/fixtures/gold_baseline.json"
+  auth:
+    enabled: true
+    api_keys: []
+  llm:
+    fast_model: "gpt-4o-mini"
+    accurate_model: "gpt-4o-mini"
+    require_citations: true
+    min_sources: 1
+  ```
+  Set API keys through environment variables for commercial deployments:
+  `LEGAL_SORTER_AUTH_ENABLED=true` and
+  `LEGAL_SORTER_API_KEYS="admin:secret-admin,operator:secret-ops,reader:secret-read"`.
 
 ### 3. CourtListener (free legal case API)
 Sign up at https://www.courtlistener.com/sign-in/, grab your API token,
@@ -136,6 +164,11 @@ uvicorn web_app:app --host 0.0.0.0 --port 8000
 ```
 Then open http://localhost:8000 in your browser.
 
+Containerized demo/hosting option:
+```
+docker compose up --build
+```
+
 API docs are auto-generated at http://localhost:8000/docs
 
 The web interface is **read-only** — it only exposes search, AI Q&A, and
@@ -154,6 +187,28 @@ python run.py crawl
 Health check (dependencies + config + DB readiness):
 ```
 python run.py health
+```
+
+Strict production-readiness check (sellability baseline):
+```
+python run.py readiness
+```
+
+Quality benchmark + regression gate:
+```
+python run.py evaluate
+# or custom dataset:
+python run.py evaluate /absolute/path/to/gold_cases.jsonl
+```
+
+Deterministic production backup (zipped DB + config):
+```
+python run.py backup
+```
+
+Restore and verify a backup:
+```
+python run.py restore /absolute/path/to/backup.zip /absolute/path/to/target_index [/absolute/path/to/config.yaml]
 ```
 
 Bulk ingest from CourtListener S3 dump:
@@ -213,6 +268,18 @@ Hand-dropped files ──┘         │
 GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 - `python -m compileall -q .`
 - `python -m unittest discover -s tests -v`
+- `python run.py evaluate`
+
+### Security / sellability baseline
+- Role-based API key access (`reader`, `operator`, `admin`) for the web/API tier
+- Durable audit-log events for search, case access, AI Q&A, ingest, replay, and admin reads
+- Quarantine + replay workflow for failed ingestion instead of destructive deletion
+- Backup manifests with checksum verification on restore
+- Citation-grounded AI answers with refusal when grounding is insufficient
+
+### Policy / operations docs
+- `docs/LEGAL_DISCLAIMER.md`
+- `docs/OPERATIONS.md`
 
 ### Search performance
 The database now has an FTS5 virtual table (`documents_fts`) built on top
