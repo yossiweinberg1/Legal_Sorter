@@ -9,6 +9,7 @@ Cache files are stored next to this module so they survive restarts.
 import os
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 import joblib
@@ -23,6 +24,7 @@ MODULE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = MODULE_DIR / "similarity_matrix.joblib"
 VECTORIZER_FILE = MODULE_DIR / "vectorizer.joblib"
 PATHS_FILE = MODULE_DIR / "indexed_paths.joblib"
+CACHE_LOCK = threading.RLock()
 
 
 def _load_config(config_path: str = "config.yaml") -> dict:
@@ -170,27 +172,28 @@ def _find_target_index(target_label: str, entries: list[dict]) -> int | None:
 
 def build_and_cache_index() -> tuple[bool, str]:
     """Build the TF-IDF similarity index from the DB (or files as fallback) and cache it."""
-    cfg = _load_config()
+    with CACHE_LOCK:
+        cfg = _load_config()
 
-    texts, entries = _load_from_db(cfg)
-    source = "database"
-    if not texts:
-        texts, entries = _load_from_files(cfg)
-        source = "pull_folder files"
+        texts, entries = _load_from_db(cfg)
+        source = "database"
+        if not texts:
+            texts, entries = _load_from_files(cfg)
+            source = "pull_folder files"
 
-    if not texts:
-        return False, "No indexed documents found. Ingest cases first."
+        if not texts:
+            return False, "No indexed documents found. Ingest cases first."
 
-    vectorizer = TfidfVectorizer(
-        max_features=25000, stop_words="english", strip_accents="unicode"
-    )
-    tfidf_matrix = vectorizer.fit_transform(texts)
+        vectorizer = TfidfVectorizer(
+            max_features=25000, stop_words="english", strip_accents="unicode"
+        )
+        tfidf_matrix = vectorizer.fit_transform(texts)
 
-    joblib.dump(tfidf_matrix, INDEX_FILE, compress=3)
-    joblib.dump(vectorizer, VECTORIZER_FILE, compress=3)
-    joblib.dump(entries, PATHS_FILE, compress=3)
+        joblib.dump(tfidf_matrix, INDEX_FILE, compress=3)
+        joblib.dump(vectorizer, VECTORIZER_FILE, compress=3)
+        joblib.dump(entries, PATHS_FILE, compress=3)
 
-    return True, f"Indexed {len(entries)} cases from {source}."
+        return True, f"Indexed {len(entries)} cases from {source}."
 
 
 def _ensure_cache() -> tuple[bool, str]:
@@ -206,47 +209,48 @@ def get_similar_cases(target_label: str, top_n: int = 5) -> dict:
 
     *target_label* may be a filename, ref_no, doc_id, or source_url.
     """
-    ok, err = _ensure_cache()
-    if not ok:
-        return {"error": err, "matches": []}
+    with CACHE_LOCK:
+        ok, err = _ensure_cache()
+        if not ok:
+            return {"error": err, "matches": []}
 
-    tfidf_matrix = joblib.load(INDEX_FILE)
-    entries = _normalize_entries(joblib.load(PATHS_FILE))
-
-    target_idx = _find_target_index(target_label, entries)
-    if target_idx is None:
-        rebuilt, rebuild_message = build_and_cache_index()
-        if not rebuilt:
-            return {"error": rebuild_message, "matches": []}
         tfidf_matrix = joblib.load(INDEX_FILE)
         entries = _normalize_entries(joblib.load(PATHS_FILE))
+
         target_idx = _find_target_index(target_label, entries)
-    if target_idx is None:
-        return {"error": f"'{target_label}' not found in the current index.", "matches": []}
+        if target_idx is None:
+            rebuilt, rebuild_message = build_and_cache_index()
+            if not rebuilt:
+                return {"error": rebuild_message, "matches": []}
+            tfidf_matrix = joblib.load(INDEX_FILE)
+            entries = _normalize_entries(joblib.load(PATHS_FILE))
+            target_idx = _find_target_index(target_label, entries)
+        if target_idx is None:
+            return {"error": f"'{target_label}' not found in the current index.", "matches": []}
 
-    target_vector = tfidf_matrix[target_idx]
-    similarities = cosine_similarity(target_vector, tfidf_matrix).flatten()
-    ranked = np.argsort(similarities)[::-1]
+        target_vector = tfidf_matrix[target_idx]
+        similarities = cosine_similarity(target_vector, tfidf_matrix).flatten()
+        ranked = np.argsort(similarities)[::-1]
 
-    results = []
-    for idx in ranked:
-        if idx == target_idx:
-            continue
-        score = float(similarities[idx])
-        if score <= 0.05:
-            break
-        entry = entries[idx]
-        results.append(
-            {
-                "label": entry.get("label"),
-                "ref_no": entry.get("ref_no"),
-                "filename": entry.get("filename"),
-                "doc_id": entry.get("doc_id"),
-                "source_url": entry.get("source_url"),
-                "score": round(score, 4),
-            }
-        )
-        if len(results) >= top_n:
-            break
+        results = []
+        for idx in ranked:
+            if idx == target_idx:
+                continue
+            score = float(similarities[idx])
+            if score <= 0.05:
+                break
+            entry = entries[idx]
+            results.append(
+                {
+                    "label": entry.get("label"),
+                    "ref_no": entry.get("ref_no"),
+                    "filename": entry.get("filename"),
+                    "doc_id": entry.get("doc_id"),
+                    "source_url": entry.get("source_url"),
+                    "score": round(score, 4),
+                }
+            )
+            if len(results) >= top_n:
+                break
 
-    return {"error": None, "matches": results}
+        return {"error": None, "matches": results}

@@ -1895,7 +1895,7 @@ class LegalSorterApp:
                     sim_label.config(text="Error: Selected entry has no searchable identifier.", foreground="red")
                     return
 
-                match = re.search(r'#(\d+)$', source_url or "")
+                match = None if ref_no else re.search(r'#(\d+)$', source_url or "")
                 case_label = ref_no or (f"bulk_{match.group(1)}.txt" if match else target_label)
 
                 try:
