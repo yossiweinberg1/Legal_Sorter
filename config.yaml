@@ -45,7 +45,7 @@ production:
   audit_log_path: "logs/audit.log"
   quarantine_folder: "quarantine"
   retention_days: 365
-  telemetry_enabled: true
+  telemetry_enabled: false
   quality_gate:
     citation_f1_min: 0.70
     entity_f1_min: 0.60

@@ -38,6 +38,7 @@ LEGAL_SORTER_BACKUP_FOLDER=/absolute/path/to/data/backups
 LEGAL_SORTER_QUARANTINE_FOLDER=/absolute/path/to/data/quarantine
 LEGAL_SORTER_AUDIT_LOG_PATH=/absolute/path/to/logs/audit.log
 LEGAL_SORTER_SUPPORT_EMAIL=support@yourdomain.com
+LEGAL_SORTER_TELEMETRY_ENABLED=false
 ```
 
 `src/config.py` now auto-loads `.env`, so you do not need to manually export these variables first.

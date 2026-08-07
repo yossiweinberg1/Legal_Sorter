@@ -139,6 +139,9 @@ def _apply_env_overrides(cfg: dict) -> dict:
     support_email = os.getenv("LEGAL_SORTER_SUPPORT_EMAIL")
     if support_email:
         prod_cfg["support_email"] = support_email.strip()
+    telemetry_enabled = _parse_bool(os.getenv("LEGAL_SORTER_TELEMETRY_ENABLED"))
+    if telemetry_enabled is not None:
+        prod_cfg["telemetry_enabled"] = telemetry_enabled
 
     return cfg
 
@@ -162,7 +165,7 @@ def _inject_defaults(cfg: dict) -> dict:
     prod_cfg.setdefault("audit_log_path", "logs/audit.log")
     prod_cfg.setdefault("quarantine_folder", "quarantine")
     prod_cfg.setdefault("retention_days", 365)
-    prod_cfg.setdefault("telemetry_enabled", True)
+    prod_cfg.setdefault("telemetry_enabled", False)
     qg_cfg = prod_cfg.setdefault("quality_gate", {})
     qg_cfg.setdefault("citation_f1_min", 0.70)
     qg_cfg.setdefault("entity_f1_min", 0.60)

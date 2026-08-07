@@ -27,6 +27,7 @@ class ConfigTests(unittest.TestCase):
         os.environ.pop("LEGAL_SORTER_AUDIT_LOG_PATH", None)
         os.environ.pop("LEGAL_SORTER_QUARANTINE_FOLDER", None)
         os.environ.pop("LEGAL_SORTER_SUPPORT_EMAIL", None)
+        os.environ.pop("LEGAL_SORTER_TELEMETRY_ENABLED", None)
 
     def _write_cfg(self, body: str) -> Path:
         path = Path(self.tmp.name) / "config.yaml"
@@ -94,6 +95,7 @@ courtlistener:
         cfg = cfgmod.load_config(str(cfg_path))
         self.assertEqual(cfg["llm"]["model"], "gpt-4o-mini")
         self.assertEqual(cfg["llm"]["max_context_chars"], 12000)
+        self.assertFalse(cfg["production"]["telemetry_enabled"])
         self.assertEqual(cfg["production"]["quality_gate"]["citation_f1_min"], 0.70)
         self.assertEqual(cfg["production"]["quality_gate"]["entity_f1_min"], 0.60)
         self.assertIn("production.support_email is not set.", cfg.get("_warnings", []))
