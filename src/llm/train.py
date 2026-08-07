@@ -157,11 +157,11 @@ def train_llm(texts, log_callback=print, stop_check=None):
             # Align the graph vector to match every token position in this case
             flat_graph_vectors.extend([g_vec] * len(encoded))
 
-        max_tokens = 25000
+        max_tokens = 200_000
         if len(flat_token_ids) > max_tokens:
             flat_token_ids = flat_token_ids[:max_tokens]
             flat_graph_vectors = flat_graph_vectors[:max_tokens]
-            log_callback(f"⚠️ Truncating dataset to {max_tokens} tokens for local CPU speed.")
+            log_callback(f"⚠️ Dataset capped at {max_tokens:,} tokens.")
 
         if len(flat_token_ids) <= 128:
             log_callback("❌ Error: Structured dataset volume is too small.")
@@ -221,8 +221,8 @@ def train_llm(texts, log_callback=print, stop_check=None):
                 x, g_vecs, y = x.to(device), g_vecs.to(device), y.to(device)
                 optim.zero_grad()
                 
-                # Run forward pass 
-                logits = model(x) 
+                # Run forward pass with graph vector conditioning
+                logits = model(x, graph_vecs=g_vecs)
                 
                 loss = loss_fn(logits.view(-1, logits.size(-1)), y.view(-1))
                 loss.backward()

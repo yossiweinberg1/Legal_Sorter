@@ -46,6 +46,33 @@ CREATE TABLE IF NOT EXISTS ref_counter (
 CREATE INDEX IF NOT EXISTS idx_documents_added_at ON documents (added_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_virtual_folder ON documents (virtual_folder);
 CREATE INDEX IF NOT EXISTS idx_priority_queue_status ON priority_queue (status);
+CREATE INDEX IF NOT EXISTS idx_documents_source_url ON documents (source_url);
+"""
+
+FTS_SETUP = """
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+    id UNINDEXED,
+    ref_no UNINDEXED,
+    virtual_folder,
+    keywords_json,
+    text,
+    content='documents',
+    content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+    INSERT INTO documents_fts(rowid, id, ref_no, virtual_folder, keywords_json, text)
+    VALUES (new.rowid, new.id, new.ref_no, new.virtual_folder, new.keywords_json, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, id, ref_no, virtual_folder, keywords_json, text)
+    VALUES ('delete', old.rowid, old.id, old.ref_no, old.virtual_folder, old.keywords_json, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+    INSERT INTO documents_fts(documents_fts, rowid, id, ref_no, virtual_folder, keywords_json, text)
+    VALUES ('delete', old.rowid, old.id, old.ref_no, old.virtual_folder, old.keywords_json, old.text);
+    INSERT INTO documents_fts(rowid, id, ref_no, virtual_folder, keywords_json, text)
+    VALUES (new.rowid, new.id, new.ref_no, new.virtual_folder, new.keywords_json, new.text);
+END;
 """
 class DB:
     def __init__(self, db_path: str):
@@ -57,6 +84,14 @@ class DB:
         self.conn.execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+
+        # FTS5 virtual table for fast full-text search (created separately to avoid
+        # executescript conflicts with triggers that reference other tables)
+        try:
+            self.conn.executescript(FTS_SETUP)
+            self.conn.commit()
+        except Exception:
+            pass  # FTS already exists or SQLite build lacks FTS5 — degrade gracefully
         try:
             self.conn.execute("ALTER TABLE documents ADD COLUMN ref_no TEXT")
             self.conn.commit()
@@ -70,7 +105,14 @@ class DB:
             self.conn.commit()
         except sqlite3.OperationalError:
             pass  # columns already exist
-            
+
+        # Ensure ref_no has an index for fast UI lookups
+        try:
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_ref_no ON documents (ref_no)")
+            self.conn.commit()
+        except Exception:
+            pass
+
         self._backfill_ref_numbers()
 
     def add_to_priority_queue(self, citation, status="SYSTEM_SEED"):
@@ -81,11 +123,11 @@ class DB:
         self.conn.commit()
 
     def get_next_priority_citation(self):
-     cursor = self.conn.cursor()
-     # This filter is the missing link to stop the loop
-     cursor.execute("SELECT citation FROM priority_queue WHERE status IS NULL OR status = 'pending' LIMIT 1")
-     row = cursor.fetchone()
-     return row[0] if row else None
+        cursor = self.conn.cursor()
+        # This filter is the missing link to stop the loop
+        cursor.execute("SELECT citation FROM priority_queue WHERE status IS NULL OR status = 'pending' LIMIT 1")
+        row = cursor.fetchone()
+        return row[0] if row else None
 
     def mark_priority_fetched(self, citation):
         self.conn.execute("UPDATE priority_queue SET status = 'fetched' WHERE citation = ?", (citation,))
@@ -136,10 +178,10 @@ class DB:
         self.conn.commit()
 
     def mark_priority_failed(self, citation: str):
-    	"""Updates the database so this citation is not attempted again."""
-    	cursor = self.conn.cursor()
-    	cursor.execute("UPDATE priority_queue SET status = 'failed' WHERE citation = ?", (citation,))
-    	self.conn.commit()
+        """Updates the database so this citation is not attempted again."""
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE priority_queue SET status = 'failed' WHERE citation = ?", (citation,))
+        self.conn.commit()
 
 # ---------- reference numbers ----------
     def get_next_ref_no(self) -> str:
@@ -201,3 +243,53 @@ class DB:
             (doc_id,),
         ).fetchall()
         return [{"doc_id": r[0], "ref_no": r[1], "citation": r[2]} for r in rows]
+
+    # ---------- full-text search (FTS5) ----------
+    def fts_search(self, query: str, limit: int = 50) -> list[dict]:
+        """Fast full-text search using SQLite FTS5.
+
+        Falls back to a LIKE scan on the first 2 000 rows if the FTS5
+        virtual table is not available (e.g. older SQLite build).
+
+        Returns a list of dicts with keys:
+            id, ref_no, virtual_folder, source_url, snippet
+        """
+        # Sanitise the query so special FTS5 operators don't crash it
+        safe_query = query.replace('"', '""').strip()
+
+        try:
+            rows = self.conn.execute(
+                """SELECT d.id, d.ref_no, d.virtual_folder, d.source_url,
+                          snippet(documents_fts, 4, '<b>', '</b>', '…', 32) AS snip
+                   FROM documents_fts
+                   JOIN documents d ON d.id = documents_fts.id
+                   WHERE documents_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (safe_query, limit),
+            ).fetchall()
+        except Exception:
+            # FTS5 not available — fall back to basic LIKE scan
+            # Escape SQL LIKE special characters in the original query
+            like_safe = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{like_safe}%"
+            rows = self.conn.execute(
+                """SELECT id, ref_no, virtual_folder, source_url,
+                          SUBSTR(text, 1, 300) AS snip
+                   FROM documents
+                   WHERE text LIKE ? ESCAPE '\\' OR keywords_json LIKE ? ESCAPE '\\'
+                   ORDER BY added_at DESC
+                   LIMIT ?""",
+                (like, like, limit),
+            ).fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "ref_no": r[1],
+                "virtual_folder": r[2],
+                "source_url": r[3],
+                "snippet": (r[4] or "").replace("\n", " ")[:400],
+            }
+            for r in rows
+        ]

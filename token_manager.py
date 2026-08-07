@@ -1,50 +1,64 @@
+"""Secure token update utility.
+
+Updates the CourtListener API token in config.yaml ONLY.
+Never reads or modifies source code files.
+
+Usage:
+    python token_manager.py
+
+Or set the environment variable directly (preferred for CI/automation):
+    Windows:  setx COURTLISTENER_API_TOKEN "your-token-here"
+    Linux/Mac: export COURTLISTENER_API_TOKEN="your-token-here"
+"""
 import yaml
 import os
 from pathlib import Path
 
-def direct_system_token_swap(new_token, config_path="config.yaml", fetch_path="src/legal_fetch.py"):
+
+def update_config_token(new_token: str, config_path: str = "config.yaml") -> None:
+    """Write the new token into config.yaml under courtlistener.api_tokens.
+
+    The token is stored as a single-element list to match the multi-token
+    format the rest of the app expects.  Never writes to source code files.
     """
-    Takes a manually pasted token, securely overwrites config.yaml, 
-    and purges any remnants of the old token from execution environments.
-    """
-    # 1. Load old token for the purge sequence
-    if os.path.exists(config_path):
-        with open(config_path, "r") as f:
+    config_path = Path(config_path)
+
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
     else:
         config = {}
 
-    old_token = config.get("api_token")
-    
-    # 2. Overwrite the config with the fresh token
-    config["api_token"] = new_token.strip()
-    with open(config_path, "w") as f:
-        yaml.safe_dump(config, f)
-    print("[+] config.yaml safely updated with the new token.", flush=True)
+    # Ensure the courtlistener section exists
+    if "courtlistener" not in config:
+        config["courtlistener"] = {}
 
-    # 3. Clean and purge references inside legal_fetch.py
-    if old_token and os.path.exists(fetch_path):
-        with open(fetch_path, "r") as f:
-            content = f.read()
-        
-        if old_token in content:
-            content = content.replace(old_token, new_token.strip())
-            with open(fetch_path, "w") as f:
-                f.write(content)
-            print(f"[+] Old key ending in ...{old_token[-6:]} completely purged from execution scripts.", flush=True)
-        else:
-            print("[+] Checked legal_fetch.py: Clean of hardcoded old tokens.", flush=True)
+    config["courtlistener"]["api_tokens"] = [new_token.strip()]
+
+    # Remove the legacy single-token key if present
+    config["courtlistener"].pop("api_token", None)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, default_flow_style=False)
+
+    print(f"[+] Token saved to {config_path}.", flush=True)
+    print(
+        "[!] Tip: For better security, use the environment variable instead:\n"
+        "       Windows:  setx COURTLISTENER_API_TOKEN \"your-token\"\n"
+        "       Linux/Mac: export COURTLISTENER_API_TOKEN=\"your-token\"",
+        flush=True,
+    )
+
 
 if __name__ == "__main__":
     print("=== LegalSorter Secure Token Update Utility ===")
-    print("Log into CourtListener in your browser, click 'Regenerate' on your API profile, and copy it.")
-    print("-----------------------------------------------------------------------------------------")
-    
-    user_token = input("Paste your fresh API token here: ").strip()
-    
+    print("Log into CourtListener, regenerate your API token, and paste it below.")
+    print("-" * 60)
+
+    user_token = input("Paste your CourtListener API token here: ").strip()
+
     if len(user_token) < 20:
         print("[CRITICAL] That string looks too short to be a valid CourtListener API token.")
     else:
-        print("\n--- Executing System Swap ---")
-        direct_system_token_swap(user_token)
-        print("--- Update Complete: System is optimized and ready ---")
+        update_config_token(user_token)
+        print("--- Token updated. Run the app normally. ---")

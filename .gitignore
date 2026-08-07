@@ -16,3 +16,56 @@ _site/
 # counterproductive to check this file into the repository.
 # Details at https://github.com/github/pages-gem/issues/768
 Gemfile.lock
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# --- Generated runtime artifacts: never commit these ---
+
+# ML model weights and tokenizer
+src/llm/model.pt
+src/llm/tokenizer.json
+src/llm/checkpoint.pt
+
+# Similarity index cache
+similarity_matrix.joblib
+vectorizer.joblib
+indexed_paths.joblib
+vector_mapping.json
+legal_sorter_vectors.index
+
+# Runtime logs and state files
+ui_extraction_errors.json
+bulk_ingest_state.json
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
