@@ -56,6 +56,10 @@ def _inject_defaults(cfg: dict) -> dict:
     prod_cfg.setdefault("support_email", "")
     prod_cfg.setdefault("backup_folder", "")
     prod_cfg.setdefault("audit_log_path", "logs/audit.log")
+    qg_cfg = prod_cfg.setdefault("quality_gate", {})
+    qg_cfg.setdefault("citation_f1_min", 0.70)
+    qg_cfg.setdefault("entity_f1_min", 0.60)
+    qg_cfg.setdefault("min_cases", 1)
     return cfg
 
 
@@ -96,6 +100,21 @@ def validate_config(cfg: dict, strict: bool = False) -> tuple[list[str], list[st
             warnings.append("production.support_email is not set.")
         if not str(prod_cfg.get("backup_folder", "")).strip():
             warnings.append("production.backup_folder is not set.")
+
+    qg_cfg = prod_cfg.get("quality_gate", {}) or {}
+    for key in ("citation_f1_min", "entity_f1_min"):
+        value = qg_cfg.get(key)
+        try:
+            f = float(value)
+            if f < 0 or f > 1:
+                errors.append(f"production.quality_gate.{key} must be between 0 and 1.")
+        except Exception:
+            errors.append(f"production.quality_gate.{key} must be a number between 0 and 1.")
+    try:
+        if int(qg_cfg.get("min_cases", 1)) < 1:
+            errors.append("production.quality_gate.min_cases must be >= 1.")
+    except Exception:
+        errors.append("production.quality_gate.min_cases must be an integer.")
 
     return errors, warnings
 

@@ -85,6 +85,8 @@ courtlistener:
         cfg = cfgmod.load_config(str(cfg_path))
         self.assertEqual(cfg["llm"]["model"], "gpt-4o-mini")
         self.assertEqual(cfg["llm"]["max_context_chars"], 12000)
+        self.assertEqual(cfg["production"]["quality_gate"]["citation_f1_min"], 0.70)
+        self.assertEqual(cfg["production"]["quality_gate"]["entity_f1_min"], 0.60)
         self.assertIn("production.support_email is not set.", cfg.get("_warnings", []))
 
 

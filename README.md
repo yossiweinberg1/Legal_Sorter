@@ -68,6 +68,10 @@ This creates `.venv`, installs dependencies, and runs a local health check.
     support_email: "support@yourdomain.com"
     backup_folder: "/absolute/path/to/backups"
     audit_log_path: "logs/audit.log"
+    quality_gate:
+      citation_f1_min: 0.70
+      entity_f1_min: 0.60
+      min_cases: 1
   ```
 
 ### 3. CourtListener (free legal case API)
@@ -167,6 +171,18 @@ python run.py health
 Strict production-readiness check (sellability baseline):
 ```
 python run.py readiness
+```
+
+Quality benchmark + regression gate:
+```
+python run.py evaluate
+# or custom dataset:
+python run.py evaluate /absolute/path/to/gold_cases.jsonl
+```
+
+Deterministic production backup (zipped DB + config):
+```
+python run.py backup
 ```
 
 Bulk ingest from CourtListener S3 dump:
