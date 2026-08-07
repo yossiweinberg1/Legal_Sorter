@@ -85,6 +85,19 @@ except Exception as e:
 _safe_console_print("[Bootloader] All systems green. Initializing Tkinter window...\n")
 
 # =====================================================================
+# Icon helpers
+# =====================================================================
+from src.icon_utils import make_icon_ico as _make_icon_ico, ensure_icon as _ensure_icon
+
+_ICON_PATH = Path(__file__).resolve().parent / "legal_sorter.ico"
+
+# Pre-generate the icon once so the shortcut creator can also reference it
+try:
+    _ensure_icon(_ICON_PATH)
+except Exception:
+    pass
+
+# =====================================================================
 class LegalSorterApp:
     def __init__(self, root):
         self.root = root
@@ -122,7 +135,17 @@ class LegalSorterApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def apply_branding(self):
-        """Apply lightweight built-in branding without requiring external assets."""
+        """Apply built-in branding: proper .ico on Windows, PhotoImage elsewhere."""
+        # ── Windows: use the .ico file for title-bar AND taskbar ──────────────
+        if sys.platform == "win32":
+            try:
+                self.root.wm_iconbitmap(_ensure_icon(_ICON_PATH))
+                self._app_icon = None
+                return
+            except Exception:
+                pass  # fall through to PhotoImage fallback
+
+        # ── Other platforms: paint a PhotoImage programmatically ──────────────
         try:
             self._app_icon = tk.PhotoImage(width=64, height=64)
             icon = self._app_icon

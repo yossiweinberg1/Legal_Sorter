@@ -18,6 +18,18 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parent
 APP_SCRIPT = APP_ROOT / "app.pyw"
+ICON_PATH = APP_ROOT / "legal_sorter.ico"
+
+# Import the shared icon utility; if for some reason src/ is not on the path
+# yet (standalone usage before a full venv install), fall back gracefully.
+try:
+    sys.path.insert(0, str(APP_ROOT))
+    from src.icon_utils import ensure_icon as _ensure_icon_fn
+    def _ensure_icon() -> str:
+        return _ensure_icon_fn(ICON_PATH)
+except Exception:
+    def _ensure_icon() -> str:  # type: ignore[misc]
+        return str(ICON_PATH)  # icon may not exist; shortcut will show default
 
 
 def _find_python_exe() -> str:
@@ -52,6 +64,7 @@ def create_windows_shortcut():
         shortcut.WorkingDirectory = str(APP_ROOT)
         shortcut.Description = "LegalSorter — AI-powered legal case organiser"
         shortcut.WindowStyle = 1
+        shortcut.IconLocation = _ensure_icon()
         shortcut.Save()
         print(f"[OK] Windows shortcut created: {lnk_path}")
     except ImportError:
