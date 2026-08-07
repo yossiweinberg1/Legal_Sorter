@@ -198,7 +198,7 @@ def stats():
 # Browser UI (single-page HTML)
 # ---------------------------------------------------------------------------
 
-_HTML = """<!DOCTYPE html>
+_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
