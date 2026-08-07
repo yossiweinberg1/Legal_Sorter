@@ -8,9 +8,7 @@ keep_if_no_repull_source: true
 courtlistener:
   base_url: "https://www.courtlistener.com/api/rest/v4"
   api_tokens:
-   - "c0cff8d1c354a4257db36de072729074fd816a1a"
-   - "3fe332643c81719059d969cea99d33c83707ca5d"
-   - "5d873ce52b03f1d82c0ba9dc0a2796e89775b2d2" 
+   - "set-in-env-courtlistener-api-token"
 # Use specific case names to avoid huge search results
 seed_cases:
   - "State v. Roman-Navarre"

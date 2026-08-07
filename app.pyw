@@ -15,6 +15,7 @@ from src.watcher import TOKEN_REGISTRY, initialize_token_registry
 from src import config as cfgmod
 from similarity_service import build_and_cache_index, get_similar_cases
 from src.legal_fetch import CourtListenerClient
+from src.study_assistant import generate_study_response
 
 # Import the window class from the new file you just created
 from error_ledger import ErrorLedgerWindow
@@ -523,10 +524,18 @@ class LegalSorterApp:
         threading.Thread(target=self._async_ai_generation_worker, args=(prompt_text,), daemon=True).start()
 
     def _async_ai_generation_worker(self, prompt_text):
-        """Background worker that calls your local inference script safely."""
+        """RAG-first response worker with local LLM fallback."""
         try:
-            import infer
-            ai_response = infer.generate(prompt=prompt_text)
+            selected_doc_id = self.get_selected_doc_id()
+            ai_response = generate_study_response(
+                db_path=self.db_path,
+                prompt=prompt_text,
+                selected_doc_id=selected_doc_id,
+                max_sources=4,
+            )
+            if not ai_response.strip():
+                import infer
+                ai_response = infer.generate(prompt=prompt_text)
             self.root.after(0, self._update_ui_with_ai_text, ai_response)
         except Exception as err:
             self.root.after(0, self.ai_status_var.set, "Error: Generation failed.")
