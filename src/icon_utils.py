@@ -4,8 +4,8 @@ Generates a 32x32 LegalSorter .ico file using only stdlib (struct + zlib),
 so no Pillow or other third-party dependency is required.  The ICO uses a
 PNG payload (Vista+ compatible) for crisp rendering on high-DPI displays.
 
-Design: dark-navy background, gold border, blue left pillar,
-        amber balance-scale beam and pans.
+Design: dark-navy background (#1E2D40), teal balance-scale beam, pans, and
+        pillar (#3E9BC0), steel-gray document stack (#8FA3B1).
 """
 import struct
 import zlib
@@ -15,37 +15,38 @@ from pathlib import Path
 def make_icon_ico(dest: Path) -> None:
     """Write (or overwrite) *dest* with a fresh LegalSorter .ico file."""
     W = H = 32
-    # Colours as (R, G, B)
-    NAVY  = (0x1f, 0x24, 0x38)
-    GOLD  = (0xf5, 0xc5, 0x42)
-    BLUE  = (0x2e, 0x86, 0xde)
-    AMBER = (0xf3, 0x9c, 0x12)
+    # Colours as (R, G, B) — new Legal Sorter branding palette
+    NAVY  = (0x1E, 0x2D, 0x40)  # dark-navy background
+    TEAL  = (0x3E, 0x9B, 0xC0)  # teal scale / highlights
+    GRAY  = (0x8F, 0xA3, 0xB1)  # steel-gray document
 
     def _px(x: int, y: int) -> tuple:
-        # Gold border (2 px)
-        if x < 2 or x >= W - 2 or y < 2 or y >= H - 2:
-            return GOLD
-        # Blue left pillar (cols 4–8, rows 4–27)
-        if 4 <= x <= 8 and 4 <= y <= 27:
-            return BLUE
-        # Amber horizontal beam (row 14, cols 9–26)
-        if y == 14 and 9 <= x <= 26:
-            return AMBER
-        # Amber vertical centre post (col 17, rows 6–13)
-        if x == 17 and 6 <= y <= 13:
-            return AMBER
-        # Left pan (3-px wide, rows 18–20, cols 10–14)
-        if 10 <= x <= 14 and 18 <= y <= 20:
-            return AMBER
-        # Right pan (3-px wide, rows 20–22, cols 20–24)
-        if 20 <= x <= 24 and 20 <= y <= 22:
-            return AMBER
-        # Base post (col 17, rows 24–27)
-        if x == 17 and 24 <= y <= 27:
-            return AMBER
-        # Base feet (row 27, cols 13–21)
-        if y == 27 and 13 <= x <= 21:
-            return AMBER
+        # ── Scale beam (row 12, cols 6–25) ──────────────────────────────
+        if y == 12 and 6 <= x <= 25:
+            return TEAL
+        # ── Centre post (col 15, rows 4–11 and 20–27) ───────────────────
+        if x == 15 and (4 <= y <= 11 or 20 <= y <= 27):
+            return TEAL
+        # ── Left pan (cols 4–9, rows 15–17) ─────────────────────────────
+        if 4 <= x <= 9 and 15 <= y <= 17:
+            return TEAL
+        # ── Right pan (cols 20–25, rows 15–17) ──────────────────────────
+        if 20 <= x <= 25 and 15 <= y <= 17:
+            return TEAL
+        # ── Left chain (col 7, rows 13–14) ──────────────────────────────
+        if x == 7 and 13 <= y <= 14:
+            return TEAL
+        # ── Right chain (col 22, rows 13–14) ────────────────────────────
+        if x == 22 and 13 <= y <= 14:
+            return TEAL
+        # ── Document stack (cols 10–20, rows 20–25) ─────────────────────
+        if 10 <= x <= 20 and 20 <= y <= 22:
+            return GRAY
+        if 11 <= x <= 19 and 23 <= y <= 25:
+            return GRAY
+        # ── Base feet (row 27, cols 11–19) ──────────────────────────────
+        if y == 27 and 11 <= x <= 19:
+            return TEAL
         return NAVY
 
     # Build raw PNG scanlines (filter byte 0 = None per row)

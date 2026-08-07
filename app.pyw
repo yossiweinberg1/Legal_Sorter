@@ -149,16 +149,20 @@ class LegalSorterApp:
         try:
             self._app_icon = tk.PhotoImage(width=64, height=64)
             icon = self._app_icon
-            icon.put("#1f2438", to=(0, 0, 64, 64))
-            icon.put("#f5c542", to=(4, 4, 60, 60))
-            icon.put("#1f2438", to=(10, 10, 54, 54))
-            icon.put("#2e86de", to=(16, 16, 24, 48))
-            icon.put("#2e86de", to=(16, 40, 34, 48))
-            icon.put("#f39c12", to=(38, 16, 48, 22))
-            icon.put("#f39c12", to=(34, 22, 44, 30))
-            icon.put("#f39c12", to=(38, 30, 48, 36))
-            icon.put("#f39c12", to=(42, 36, 52, 44))
-            icon.put("#f39c12", to=(38, 44, 48, 50))
+            # Dark-navy background
+            icon.put("#1E2D40", to=(0, 0, 64, 64))
+            # Teal balance-scale beam (row ~24, cols 10–54)
+            icon.put("#3E9BC0", to=(10, 22, 54, 26))
+            # Teal centre post (col 30–34, rows 6–22 and 38–52)
+            icon.put("#3E9BC0", to=(29, 6, 33, 22))
+            icon.put("#3E9BC0", to=(29, 38, 33, 52))
+            # Teal left pan (cols 8–20, rows 28–34)
+            icon.put("#3E9BC0", to=(8, 28, 20, 34))
+            # Teal right pan (cols 43–55, rows 28–34)
+            icon.put("#3E9BC0", to=(43, 28, 55, 34))
+            # Steel-gray document stack
+            icon.put("#8FA3B1", to=(20, 38, 44, 46))
+            icon.put("#8FA3B1", to=(22, 47, 42, 54))
             self.root.iconphoto(True, icon)
         except Exception:
             self._app_icon = None
