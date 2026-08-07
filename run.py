@@ -10,6 +10,7 @@ if sys.platform == "win32":
 # 2. IMPORT WATCHER LOGIC
 try:
     from src.watcher import run_forever
+    from src.health_check import run_health_check
 
 except ImportError as e:
     print(f"Error loading src.watcher: {e}")
@@ -41,7 +42,10 @@ def main():
 
     # Execution Logic
     try:
-        if args and args[0] == "crawl":
+        if args and args[0] == "health":
+            print("[Command] Running local health check...")
+            sys.exit(run_health_check())
+        elif args and args[0] == "crawl":
             print("[Command] Received 'crawl' signal. Initiating watcher loop...")
             run_forever()
         else:
