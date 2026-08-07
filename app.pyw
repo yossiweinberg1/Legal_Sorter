@@ -4,7 +4,6 @@ import sqlite3
 import json
 import os
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
 import subprocess
 import time
 import threading
@@ -23,39 +22,67 @@ from error_ledger import ErrorLedgerWindow
 
 LEDGER_FILE = "ui_extraction_errors.json"
 
+
+def _safe_console_print(message: str) -> None:
+    stream = sys.stdout
+    if stream is None:
+        return
+    try:
+        stream.write(f"{message}\n")
+        stream.flush()
+    except Exception:
+        pass
+
+
+def _subprocess_creationflags() -> int:
+    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
+def _safe_traceback_print() -> None:
+    if sys.stderr is None:
+        return
+    try:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+    except Exception:
+        pass
+
+
+if getattr(sys.stdout, "reconfigure", None):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # =====================================================================
 # 🛡️ ANTI-HANG & DIAGNOSTIC BOOTSTRAPPER (Windows ARM64 / PyTorch Safe)
 # =====================================================================
-print("\n[Bootloader] Initializing system environment...")
+_safe_console_print("\n[Bootloader] Initializing system environment...")
 
 # Disable physical CUDA/GPU driver scans to prevent ARM64 driver deadlocks
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 # Restrict OpenMP thread allocations during startup initialization
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
-print("[Bootloader] Thread and GPU environmental blocks secured.")
+_safe_console_print("[Bootloader] Thread and GPU environmental blocks secured.")
 
 # Resolve and append the internal model script path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "src", "llm")))
-print("[Bootloader] Source paths appended to environment.")
+_safe_console_print("[Bootloader] Source paths appended to environment.")
 
 # Diagnostic pre-import sequence
 try:
-    print("[Bootloader] Safe-loading PyTorch core...")
+    _safe_console_print("[Bootloader] Safe-loading PyTorch core...")
     start_t = time.time()
     import torch
-    print(f"[Bootloader] PyTorch loaded successfully in {time.time() - start_t:.2f}s.")
+    _safe_console_print(f"[Bootloader] PyTorch loaded successfully in {time.time() - start_t:.2f}s.")
     
-    print("[Bootloader] Safe-loading training dependencies...")
+    _safe_console_print("[Bootloader] Safe-loading training dependencies...")
     start_t = time.time()
     import train
-    print(f"[Bootloader] Training matrix loaded successfully in {time.time() - start_t:.2f}s.")
+    _safe_console_print(f"[Bootloader] Training matrix loaded successfully in {time.time() - start_t:.2f}s.")
 except Exception as e:
-    print(f"[Bootloader ❌ ERROR] Pre-import sequence failed: {e}")
-    import traceback
-    traceback.print_exc()
+    _safe_console_print(f"[Bootloader ❌ ERROR] Pre-import sequence failed: {e}")
+    _safe_traceback_print()
 
-print("[Bootloader] All systems green. Initializing Tkinter window...\n")
+_safe_console_print("[Bootloader] All systems green. Initializing Tkinter window...\n")
 
 # =====================================================================
 class LegalSorterApp:
@@ -73,6 +100,8 @@ class LegalSorterApp:
         self.root.title(" LegalSorter Control Center")
         self.root.geometry("1380x860")
         self.root.minsize(1120, 740)
+        self._app_icon = None
+        self.apply_branding()
         
         self.stop_event = threading.Event()
         
@@ -90,6 +119,25 @@ class LegalSorterApp:
 
         # Intercept window closing to clean up background processes safely
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def apply_branding(self):
+        """Apply lightweight built-in branding without requiring external assets."""
+        try:
+            self._app_icon = tk.PhotoImage(width=64, height=64)
+            icon = self._app_icon
+            icon.put("#1f2438", to=(0, 0, 64, 64))
+            icon.put("#f5c542", to=(4, 4, 60, 60))
+            icon.put("#1f2438", to=(10, 10, 54, 54))
+            icon.put("#2e86de", to=(16, 16, 24, 48))
+            icon.put("#2e86de", to=(16, 40, 34, 48))
+            icon.put("#f39c12", to=(38, 16, 48, 22))
+            icon.put("#f39c12", to=(34, 22, 44, 30))
+            icon.put("#f39c12", to=(38, 30, 48, 36))
+            icon.put("#f39c12", to=(42, 36, 52, 44))
+            icon.put("#f39c12", to=(38, 44, 48, 50))
+            self.root.iconphoto(True, icon)
+        except Exception:
+            self._app_icon = None
 
     def build_menu(self):
         """Builds a simple modern command menu for frequently used actions."""
@@ -177,7 +225,13 @@ class LegalSorterApp:
         """Runs local health check command in a non-blocking subprocess."""
         try:
             py = sys.executable
-            proc = subprocess.run([py, "run.py", "health"], capture_output=True, text=True, check=False)
+            proc = subprocess.run(
+                [py, "run.py", "health"],
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=_subprocess_creationflags(),
+            )
             output = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "No output."
             messagebox.showinfo("Health Check", output)
         except Exception as err:
@@ -1630,7 +1684,7 @@ class LegalSorterApp:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                creationflags=_subprocess_creationflags(),
             )
             
             self.session_start_time = time.time()
@@ -1833,22 +1887,19 @@ class LegalSorterApp:
                     return
 
                 row_values = tree.item(selected_item[0], "values") or []
+                ref_no = row_values[1] if len(row_values) > 1 else None
                 source_url = row_values[3] if len(row_values) > 3 else None
 
-                if not source_url or not isinstance(source_url, str):
-                    sim_label.config(text="Error: Selected entry has no source URL.", foreground="red")
+                target_label = ref_no or source_url
+                if not target_label or not isinstance(target_label, str):
+                    sim_label.config(text="Error: Selected entry has no searchable identifier.", foreground="red")
                     return
 
-                match = re.search(r'#(\d+)$', source_url)
-                if not match:
-                    sim_label.config(text="Error: Selected entry has an unexpected source URL format.", foreground="red")
-                    return
-
-                opinion_id = match.group(1)
-                target_filename = f"bulk_{opinion_id}.txt"
+                match = None if ref_no else re.search(r'#(\d+)$', source_url or "")
+                case_label = ref_no or (f"bulk_{match.group(1)}.txt" if match else target_label)
 
                 try:
-                    result = get_similar_cases(target_filename, top_n=3)
+                    result = get_similar_cases(case_label, top_n=3)
                 except Exception as e:
                     sim_label.config(text=f"Matrix Error: {e}", foreground="#e74c3c")
                     return
@@ -1857,15 +1908,21 @@ class LegalSorterApp:
                     sim_label.config(text=f"Matrix Error: {result['error']}", foreground="#e74c3c")
                 elif not result.get("matches"):
                     sim_label.config(
-                        text=f"Case ID #{opinion_id} Loaded: No matching concepts discovered in current local index batch.",
+                        text=f"Case {case_label} Loaded: No matching concepts discovered in current local index batch.",
                         foreground="#d35400",
                     )
                 else:
-                    display_lines = [f"Top conceptual legal matches for Case Target #{opinion_id}:"]
+                    display_lines = [f"Top conceptual legal matches for {case_label}:"]
                     for i, match_data in enumerate(result["matches"]):
                         confidence_percentage = int(match_data.get("score", 0) * 100)
+                        match_label = (
+                            match_data.get("ref_no")
+                            or match_data.get("filename")
+                            or match_data.get("label")
+                            or "?"
+                        )
                         display_lines.append(
-                            f" [{i+1}] Filename: {match_data.get('filename','?')} ---> Structural Match Strength: {confidence_percentage}%"
+                            f" [{i+1}] Match: {match_label} ---> Structural Match Strength: {confidence_percentage}%"
                         )
                     sim_label.config(text="\n".join(display_lines), font=("Consolas", 10, "normal"), foreground="#2c3e50")
 

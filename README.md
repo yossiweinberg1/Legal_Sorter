@@ -52,6 +52,8 @@ This creates `.venv`, installs dependencies, and runs a local health check.
 4. Install dependencies: `pip install -r requirements.txt`
 5. Run from VS Code terminal: `python app.pyw` (desktop UI) or
    `uvicorn web_app:app --reload` (web interface)
+6. On Windows, you can also double-click `LegalSorter.vbs` to launch the
+   desktop UI without a visible console window.
 
 ### 2. Edit `config.yaml`
 - `pull_folder`, `index_folder`, `pending_folder` — paths on your internal
@@ -121,6 +123,11 @@ setx LLM_API_KEY "sk-..."
 ### Desktop UI
 ```
 python app.pyw
+```
+
+Windows no-console launcher:
+```
+LegalSorter.vbs
 ```
 
 ### Web interface (read-only, searchable website)

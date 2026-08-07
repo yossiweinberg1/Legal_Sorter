@@ -4,7 +4,7 @@ import traceback
 import yaml  # Assuming you use PyYAML for your config.yaml
 
 # 1. FORCE UTF-8 ENCODING (Standardized for Windows Console)
-if sys.platform == "win32":
+if sys.platform == "win32" and getattr(sys.stdout, "reconfigure", None):
     sys.stdout.reconfigure(encoding='utf-8')
 
 # 2. IMPORT WATCHER LOGIC

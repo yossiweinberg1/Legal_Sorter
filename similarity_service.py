@@ -7,18 +7,24 @@ Index source priority:
 Cache files are stored next to this module so they survive restarts.
 """
 import os
+import re
+import sqlite3
+import threading
 from pathlib import Path
+
 import joblib
 import numpy as np
+import yaml
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import sqlite3
-import yaml
+
+MODULE_DIR = Path(__file__).resolve().parent
 
 # Cache file locations
-INDEX_FILE = "similarity_matrix.joblib"
-VECTORIZER_FILE = "vectorizer.joblib"
-PATHS_FILE = "indexed_paths.joblib"
+INDEX_FILE = MODULE_DIR / "similarity_matrix.joblib"
+VECTORIZER_FILE = MODULE_DIR / "vectorizer.joblib"
+PATHS_FILE = MODULE_DIR / "indexed_paths.joblib"
+CACHE_LOCK = threading.RLock()
 
 
 def _load_config(config_path: str = "config.yaml") -> dict:
@@ -28,8 +34,38 @@ def _load_config(config_path: str = "config.yaml") -> dict:
     return {}
 
 
-def _load_from_db(cfg: dict) -> tuple[list[str], list[str]]:
-    """Load texts and labels from the SQLite documents table."""
+def _clean_aliases(*values: str | None) -> list[str]:
+    aliases: list[str] = []
+    for value in values:
+        if not value or not isinstance(value, str):
+            continue
+        value = value.strip()
+        if value and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
+def _bulk_filename_from_url(source_url: str | None) -> str | None:
+    if not source_url:
+        return None
+    match = re.search(r"#(\d+)$", source_url)
+    if not match:
+        return None
+    return f"bulk_{match.group(1)}.txt"
+
+
+def _entry_label(entry: dict) -> str:
+    return (
+        entry.get("ref_no")
+        or entry.get("filename")
+        or entry.get("doc_id")
+        or entry.get("label")
+        or "unknown"
+    )
+
+
+def _load_from_db(cfg: dict) -> tuple[list[str], list[dict]]:
+    """Load texts and matchable metadata from the SQLite documents table."""
     index_folder = cfg.get("index_folder", "")
     db_path = Path(index_folder) / "legal_sorter.db" if index_folder else None
 
@@ -39,57 +75,125 @@ def _load_from_db(cfg: dict) -> tuple[list[str], list[str]]:
     try:
         with sqlite3.connect(str(db_path)) as conn:
             rows = conn.execute(
-                "SELECT id, ref_no, SUBSTR(text, 1, 20000) FROM documents "
+                "SELECT id, ref_no, source_url, source_path, SUBSTR(text, 1, 20000) FROM documents "
                 "WHERE text IS NOT NULL AND text != '' ORDER BY added_at DESC LIMIT 5000"
             ).fetchall()
-        texts = [r[2] for r in rows if r[2].strip()]
-        labels = [f"{r[1] or r[0][:12]}" for r in rows if r[2].strip()]
-        return texts, labels
+        texts: list[str] = []
+        entries: list[dict] = []
+        for doc_id, ref_no, source_url, source_path, text in rows:
+            text = (text or "").strip()
+            if not text:
+                continue
+            filename = Path(source_path).name if source_path else None
+            entry = {
+                "doc_id": doc_id,
+                "ref_no": ref_no,
+                "source_url": source_url,
+                "filename": filename,
+            }
+            entry["aliases"] = _clean_aliases(
+                ref_no,
+                doc_id,
+                source_url,
+                filename,
+                _bulk_filename_from_url(source_url),
+            )
+            entry["label"] = _entry_label(entry)
+            texts.append(text)
+            entries.append(entry)
+        return texts, entries
     except Exception:
         return [], []
 
 
-def _load_from_files(cfg: dict) -> tuple[list[str], list[str]]:
+def _load_from_files(cfg: dict) -> tuple[list[str], list[dict]]:
     """Load texts from bulk_*.txt files (legacy fallback)."""
     pull_folder = Path(cfg.get("pull_folder", "pull_folder"))
     if not pull_folder.exists():
         return [], []
 
-    texts, labels = [], []
+    texts, entries = [], []
     for path in pull_folder.glob("bulk_*.txt"):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore").strip()
             if text:
                 texts.append(text)
-                labels.append(path.name)
+                entries.append(
+                    {
+                        "doc_id": None,
+                        "ref_no": None,
+                        "source_url": None,
+                        "filename": path.name,
+                        "aliases": [path.name],
+                        "label": path.name,
+                    }
+                )
         except Exception:
             continue
-    return texts, labels
+    return texts, entries
+
+
+def _normalize_entries(raw_entries) -> list[dict]:
+    if not isinstance(raw_entries, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in raw_entries:
+        if isinstance(item, str):
+            normalized.append(
+                {
+                    "doc_id": None,
+                    "ref_no": None,
+                    "source_url": None,
+                    "filename": item,
+                    "aliases": [item],
+                    "label": item,
+                }
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        entry["aliases"] = _clean_aliases(*(entry.get("aliases") or []), entry.get("label"))
+        entry["label"] = _entry_label(entry)
+        normalized.append(entry)
+    return normalized
+
+
+def _find_target_index(target_label: str, entries: list[dict]) -> int | None:
+    target = (target_label or "").strip()
+    if not target:
+        return None
+    for i, entry in enumerate(entries):
+        if target == entry.get("label") or target in (entry.get("aliases") or []):
+            return i
+    return None
 
 
 def build_and_cache_index() -> tuple[bool, str]:
     """Build the TF-IDF similarity index from the DB (or files as fallback) and cache it."""
-    cfg = _load_config()
+    with CACHE_LOCK:
+        cfg = _load_config()
 
-    texts, labels = _load_from_db(cfg)
-    source = "database"
-    if not texts:
-        texts, labels = _load_from_files(cfg)
-        source = "pull_folder files"
+        texts, entries = _load_from_db(cfg)
+        source = "database"
+        if not texts:
+            texts, entries = _load_from_files(cfg)
+            source = "pull_folder files"
 
-    if not texts:
-        return False, "No indexed documents found. Ingest cases first."
+        if not texts:
+            return False, "No indexed documents found. Ingest cases first."
 
-    vectorizer = TfidfVectorizer(
-        max_features=25000, stop_words="english", strip_accents="unicode"
-    )
-    tfidf_matrix = vectorizer.fit_transform(texts)
+        vectorizer = TfidfVectorizer(
+            max_features=25000, stop_words="english", strip_accents="unicode"
+        )
+        tfidf_matrix = vectorizer.fit_transform(texts)
 
-    joblib.dump(tfidf_matrix, INDEX_FILE, compress=3)
-    joblib.dump(vectorizer, VECTORIZER_FILE, compress=3)
-    joblib.dump(labels, PATHS_FILE, compress=3)
+        joblib.dump(tfidf_matrix, INDEX_FILE, compress=3)
+        joblib.dump(vectorizer, VECTORIZER_FILE, compress=3)
+        joblib.dump(entries, PATHS_FILE, compress=3)
 
-    return True, f"Indexed {len(labels)} cases from {source}."
+        return True, f"Indexed {len(entries)} cases from {source}."
 
 
 def _ensure_cache() -> tuple[bool, str]:
@@ -103,39 +207,50 @@ def _ensure_cache() -> tuple[bool, str]:
 def get_similar_cases(target_label: str, top_n: int = 5) -> dict:
     """Return the top-n most similar cases to *target_label*.
 
-    *target_label* is either a filename (``bulk_12345.txt``) or a ref_no
-    (``LC-000001``) — whichever was stored in the index.
+    *target_label* may be a filename, ref_no, doc_id, or source_url.
     """
-    ok, err = _ensure_cache()
-    if not ok:
-        return {"error": err, "matches": []}
+    with CACHE_LOCK:
+        ok, err = _ensure_cache()
+        if not ok:
+            return {"error": err, "matches": []}
 
-    tfidf_matrix = joblib.load(INDEX_FILE)
-    labels = joblib.load(PATHS_FILE)
+        tfidf_matrix = joblib.load(INDEX_FILE)
+        entries = _normalize_entries(joblib.load(PATHS_FILE))
 
-    # Match by filename OR ref_no
-    target_idx = next(
-        (i for i, lbl in enumerate(labels) if lbl == target_label), None
-    )
-    if target_idx is None:
-        return {
-            "error": f"'{target_label}' not found in the current index. Rebuild the index first.",
-            "matches": [],
-        }
+        target_idx = _find_target_index(target_label, entries)
+        if target_idx is None:
+            rebuilt, rebuild_message = build_and_cache_index()
+            if not rebuilt:
+                return {"error": rebuild_message, "matches": []}
+            tfidf_matrix = joblib.load(INDEX_FILE)
+            entries = _normalize_entries(joblib.load(PATHS_FILE))
+            target_idx = _find_target_index(target_label, entries)
+        if target_idx is None:
+            return {"error": f"'{target_label}' not found in the current index.", "matches": []}
 
-    target_vector = tfidf_matrix[target_idx]
-    similarities = cosine_similarity(target_vector, tfidf_matrix).flatten()
-    ranked = np.argsort(similarities)[::-1]
+        target_vector = tfidf_matrix[target_idx]
+        similarities = cosine_similarity(target_vector, tfidf_matrix).flatten()
+        ranked = np.argsort(similarities)[::-1]
 
-    results = []
-    for idx in ranked:
-        if idx == target_idx:
-            continue
-        score = float(similarities[idx])
-        if score <= 0.05:
-            break
-        results.append({"label": labels[idx], "score": round(score, 4)})
-        if len(results) >= top_n:
-            break
+        results = []
+        for idx in ranked:
+            if idx == target_idx:
+                continue
+            score = float(similarities[idx])
+            if score <= 0.05:
+                break
+            entry = entries[idx]
+            results.append(
+                {
+                    "label": entry.get("label"),
+                    "ref_no": entry.get("ref_no"),
+                    "filename": entry.get("filename"),
+                    "doc_id": entry.get("doc_id"),
+                    "source_url": entry.get("source_url"),
+                    "score": round(score, 4),
+                }
+            )
+            if len(results) >= top_n:
+                break
 
-    return {"error": None, "matches": results}
+        return {"error": None, "matches": results}
