@@ -14,6 +14,7 @@ import requests
 import bz2
 import sys
 import csv
+import re
 from bs4 import BeautifulSoup
 
 # Increase the CSV field size limit to 25 Megabytes to handle massive multi-page opinions
@@ -45,7 +46,6 @@ def _html_to_text(html: str) -> str:
         return "\n".join(line.strip() for line in text.splitlines() if line.strip())
     except Exception:
         # Absolute last resort: crude tag-strip via regex
-        import re
         return re.sub(r"<[^>]+>", " ", html).strip()
 
 
