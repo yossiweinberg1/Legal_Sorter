@@ -7,12 +7,24 @@ keep_if_no_repull_source: true
 
 courtlistener:
   base_url: "https://www.courtlistener.com/api/rest/v4"
-  api_tokens:
-   - "c0cff8d1c354a4257db36de072729074fd816a1a"
-   - "3fe332643c81719059d969cea99d33c83707ca5d"
-   - "5d873ce52b03f1d82c0ba9dc0a2796e89775b2d2" 
+  api_tokens: []
 # Use specific case names to avoid huge search results
 seed_cases:
   - "State v. Roman-Navarre"
   - "State v. Mallozzi"
   - "State v. Roman-Lopez"
+
+# === LLM / AI Assistant ===
+# Supports any OpenAI-compatible endpoint (OpenAI, Ollama, LM Studio, etc.)
+# IMPORTANT: Never put real API keys here. Use the LLM_API_KEY environment variable.
+#   Windows:  setx LLM_API_KEY "sk-..."
+#   Linux/Mac: export LLM_API_KEY="sk-..."
+# Ollama (local, free):
+#   base_url: "http://localhost:11434/v1"
+#   api_key:  ""          (leave blank or set to "ollama")
+#   model:    "llama3"    (after: ollama pull llama3)
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: ""             # override with LLM_API_KEY env var
+  model: "gpt-4o-mini"
+  max_context_chars: 12000  # chars of case text sent per RAG query

@@ -37,6 +37,16 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
+### 1b. VS Code quick connect
+1. Open your project root (the folder containing `README.md`) in VS Code
+2. Create and activate a virtual environment in that folder
+3. Select that interpreter in VS Code (`Python: Select Interpreter`)
+4. Install dependencies:
+   - `pip install -r requirements.txt`
+5. Run from VS Code terminal:
+   - UI: `python app.pyw`
+   - Crawler: `python run.py crawl`
+
 ### 2. Edit `config.yaml`
 - `pull_folder`, `index_folder`, `pending_folder` — paths on your internal
   drive. All three stay small; `index_folder` holds just the database.
@@ -54,6 +64,13 @@ it's free, official, and ToS-compliant (run by the nonprofit Free Law
 Project). I didn't build scrapers for Westlaw/Lexis/Google Scholar since
 those prohibit automated scraping. If you have your own PACER or Westlaw
 account, tell me and I can wire a fetcher against your credentials.
+
+### 3b. Token security (required)
+- Do not keep real CourtListener tokens in `config.yaml`.
+- Set token(s) as environment variables instead:
+  - `COURTLISTENER_API_TOKEN` for one token
+  - `COURTLISTENER_API_TOKENS` for multiple comma-separated tokens
+- Optional: override API base URL with `COURTLISTENER_BASE_URL`.
 
 ### 4. Phone → laptop transfer (Syncthing)
 1. Install Syncthing on your laptop: https://syncthing.net/downloads/
@@ -99,6 +116,23 @@ derived from your own corpus. As your archive grows past ~15 documents,
 TF-IDF keyword tags get more specific because they're computed *relative
 to your other cases* — that's the "learns from its own data" behavior
 without any generative risk.
+
+## Student-facing assistant mode (RAG-first)
+- The app now prioritizes retrieval-grounded study output from your local
+  `documents` table.
+- Output format is source-backed by design: answer/brief/IRAC/flashcards +
+  quoted evidence + case IDs/ref numbers/source URLs.
+- This is intended as a study aid workflow for law students and keeps source
+  traceability visible.
+
+## Hardware expectations for training/generation
+- Current tiny local model path:
+  - Minimum: 4–8 core CPU, 16 GB RAM, SSD
+  - Better: NVIDIA GPU 8–16 GB VRAM, 32 GB RAM
+- For a production-grade legal assistant:
+  - Prefer strong hosted model + retrieval, or QLoRA/LoRA tuning
+  - Practical fine-tune floor: 24 GB VRAM, 32–64 GB RAM, fast NVMe
+  - Higher quality at scale: cloud A100/H100 class GPUs
 
 Want document clustering next (auto-grouping similar cases beyond the
 current tag-based folders)? That's a natural addition once you have more
