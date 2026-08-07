@@ -14,6 +14,8 @@ import requests
 import bz2
 import sys
 import csv
+import re
+from bs4 import BeautifulSoup
 
 # Increase the CSV field size limit to 25 Megabytes to handle massive multi-page opinions
 csv.field_size_limit(25000000)
@@ -32,6 +34,19 @@ log = logging.getLogger("legal_sorter.bulk")
 
 BUCKET_URL = "https://com-courtlistener-storage.s3-us-west-2.amazonaws.com/?prefix=bulk-data/"
 NS = {'s3': 'http://s3.amazonaws.com/doc/2006-03-01/'}
+
+
+def _html_to_text(html: str) -> str:
+    """Strip HTML tags and return clean plain text, preserving paragraph breaks."""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        for tag in soup(["script", "style", "nav", "header", "footer"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n")
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    except Exception:
+        # Absolute last resort: crude tag-strip via regex
+        return re.sub(r"<[^>]+>", " ", html).strip()
 
 
 def get_latest_opinions_bulk_url() -> str:
@@ -134,9 +149,15 @@ def run_bulk_batch(cfg: dict, db: DB, max_items: int = 100) -> int:
             opinion_id = str(opinion_id).strip()
             # ==========================
 
-            text = (
-                row.get("plain_text") or row.get("html_with_citations") or row.get("html") or ""
-            ).strip()
+            plain = (row.get("plain_text") or "").strip()
+            html_fallback = (row.get("html_with_citations") or row.get("html") or "").strip()
+
+            if plain:
+                text = plain
+            elif html_fallback:
+                text = _html_to_text(html_fallback)
+            else:
+                text = ""
 
             if not text:
                 state["rows_consumed"] = rows_seen

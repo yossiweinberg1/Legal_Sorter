@@ -85,6 +85,19 @@ except Exception as e:
 _safe_console_print("[Bootloader] All systems green. Initializing Tkinter window...\n")
 
 # =====================================================================
+# Icon helpers
+# =====================================================================
+from src.icon_utils import make_icon_ico as _make_icon_ico, ensure_icon as _ensure_icon
+
+_ICON_PATH = Path(__file__).resolve().parent / "legal_sorter.ico"
+
+# Pre-generate the icon once so the shortcut creator can also reference it
+try:
+    _ensure_icon(_ICON_PATH)
+except Exception:
+    pass
+
+# =====================================================================
 class LegalSorterApp:
     def __init__(self, root):
         self.root = root
@@ -122,20 +135,34 @@ class LegalSorterApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def apply_branding(self):
-        """Apply lightweight built-in branding without requiring external assets."""
+        """Apply built-in branding: proper .ico on Windows, PhotoImage elsewhere."""
+        # ── Windows: use the .ico file for title-bar AND taskbar ──────────────
+        if sys.platform == "win32":
+            try:
+                self.root.wm_iconbitmap(_ensure_icon(_ICON_PATH))
+                self._app_icon = None
+                return
+            except Exception:
+                pass  # fall through to PhotoImage fallback
+
+        # ── Other platforms: paint a PhotoImage programmatically ──────────────
         try:
             self._app_icon = tk.PhotoImage(width=64, height=64)
             icon = self._app_icon
-            icon.put("#1f2438", to=(0, 0, 64, 64))
-            icon.put("#f5c542", to=(4, 4, 60, 60))
-            icon.put("#1f2438", to=(10, 10, 54, 54))
-            icon.put("#2e86de", to=(16, 16, 24, 48))
-            icon.put("#2e86de", to=(16, 40, 34, 48))
-            icon.put("#f39c12", to=(38, 16, 48, 22))
-            icon.put("#f39c12", to=(34, 22, 44, 30))
-            icon.put("#f39c12", to=(38, 30, 48, 36))
-            icon.put("#f39c12", to=(42, 36, 52, 44))
-            icon.put("#f39c12", to=(38, 44, 48, 50))
+            # Dark-navy background
+            icon.put("#1E2D40", to=(0, 0, 64, 64))
+            # Teal balance-scale beam (row ~24, cols 10–54)
+            icon.put("#3E9BC0", to=(10, 22, 54, 26))
+            # Teal centre post (col 30–34, rows 6–22 and 38–52)
+            icon.put("#3E9BC0", to=(29, 6, 33, 22))
+            icon.put("#3E9BC0", to=(29, 38, 33, 52))
+            # Teal left pan (cols 8–20, rows 28–34)
+            icon.put("#3E9BC0", to=(8, 28, 20, 34))
+            # Teal right pan (cols 43–55, rows 28–34)
+            icon.put("#3E9BC0", to=(43, 28, 55, 34))
+            # Steel-gray document stack
+            icon.put("#8FA3B1", to=(20, 38, 44, 46))
+            icon.put("#8FA3B1", to=(22, 47, 42, 54))
             self.root.iconphoto(True, icon)
         except Exception:
             self._app_icon = None
