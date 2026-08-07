@@ -8,6 +8,17 @@ _CONFIG_CACHE = None
 def _split_tokens(raw: str) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
+def _normalize_tokens(tokens: list[str]) -> list[str]:
+    normalized = []
+    for token in tokens:
+        t = (token or "").strip()
+        if not t:
+            continue
+        if t.lower().startswith("set-in-env"):
+            continue
+        normalized.append(t)
+    return normalized
+
 def _apply_env_overrides(cfg: dict) -> dict:
     cl_cfg = cfg.setdefault("courtlistener", {})
     env_tokens = os.getenv("COURTLISTENER_API_TOKENS")
@@ -15,9 +26,14 @@ def _apply_env_overrides(cfg: dict) -> dict:
     env_base = os.getenv("COURTLISTENER_BASE_URL")
 
     if env_tokens:
-        cl_cfg["api_tokens"] = _split_tokens(env_tokens)
+        cl_cfg["api_tokens"] = _normalize_tokens(_split_tokens(env_tokens))
     elif env_token:
-        cl_cfg["api_tokens"] = [env_token.strip()]
+        cl_cfg["api_tokens"] = _normalize_tokens([env_token.strip()])
+    else:
+        tokens = cl_cfg.get("api_tokens", [])
+        if not tokens and cl_cfg.get("api_token"):
+            tokens = [cl_cfg.get("api_token")]
+        cl_cfg["api_tokens"] = _normalize_tokens(tokens)
 
     if env_base:
         cl_cfg["base_url"] = env_base.strip()

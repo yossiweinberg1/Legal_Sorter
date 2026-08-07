@@ -15,7 +15,7 @@ from src.watcher import TOKEN_REGISTRY, initialize_token_registry
 from src import config as cfgmod
 from similarity_service import build_and_cache_index, get_similar_cases
 from src.legal_fetch import CourtListenerClient
-from src.study_assistant import generate_study_response
+from src.study_assistant import generate_study_response, NO_DOCS_SENTINEL, NO_MATCH_SENTINEL
 
 # Import the window class from the new file you just created
 from error_ledger import ErrorLedgerWindow
@@ -533,7 +533,7 @@ class LegalSorterApp:
                 selected_doc_id=selected_doc_id,
                 max_sources=4,
             )
-            if not ai_response.strip():
+            if (not ai_response.strip()) or ai_response in {NO_DOCS_SENTINEL, NO_MATCH_SENTINEL}:
                 import infer
                 ai_response = infer.generate(prompt=prompt_text)
             self.root.after(0, self._update_ui_with_ai_text, ai_response)

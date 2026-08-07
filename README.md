@@ -38,14 +38,14 @@ python -m spacy download en_core_web_sm
 ```
 
 ### 1b. VS Code quick connect
-1. Open `/home/runner/work/Legal_Sorter/Legal_Sorter` in VS Code
+1. Open your project root (the folder containing `README.md`) in VS Code
 2. Create and activate a virtual environment in that folder
 3. Select that interpreter in VS Code (`Python: Select Interpreter`)
 4. Install dependencies:
-   - `pip install -r /home/runner/work/Legal_Sorter/Legal_Sorter/requirements.txt`
+   - `pip install -r requirements.txt`
 5. Run from VS Code terminal:
-   - UI: `python /home/runner/work/Legal_Sorter/Legal_Sorter/app.pyw`
-   - Crawler: `python /home/runner/work/Legal_Sorter/Legal_Sorter/run.py crawl`
+   - UI: `python app.pyw`
+   - Crawler: `python run.py crawl`
 
 ### 2. Edit `config.yaml`
 - `pull_folder`, `index_folder`, `pending_folder` — paths on your internal

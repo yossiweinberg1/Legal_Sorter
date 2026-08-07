@@ -1,7 +1,14 @@
 import json
 import re
 import sqlite3
+import logging
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
+
+MAX_LOAD_DOCS = 1500
+NO_DOCS_SENTINEL = "No indexed documents available. Ingest cases first, then retry."
+NO_MATCH_SENTINEL = "No relevant source-backed matches found for that prompt. Try narrower legal terms."
 
 
 @dataclass
@@ -34,20 +41,21 @@ def _extract_ruling_logic(entities_json: str) -> str:
 
 def _load_docs(db_path: str) -> list[StudyDoc]:
     try:
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, ref_no, source_url, virtual_folder, text, entities_json, citations_json, keywords_json
-            FROM documents
-            WHERE text IS NOT NULL AND text != ''
-            ORDER BY added_at DESC
-            LIMIT 1500
-            """
-        )
-        rows = cur.fetchall()
-        conn.close()
-    except Exception:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, ref_no, source_url, virtual_folder, text, entities_json, citations_json, keywords_json
+                FROM documents
+                WHERE text IS NOT NULL AND text != ''
+                ORDER BY added_at DESC
+                LIMIT ?
+                """,
+                (MAX_LOAD_DOCS,),
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        log.warning("Failed to load study documents from database: %s", e)
         return []
 
     docs = []
@@ -176,9 +184,21 @@ def _build_qa(prompt: str, docs: list[StudyDoc], query_terms: set[str]) -> str:
 
 
 def generate_study_response(db_path: str, prompt: str, selected_doc_id: str | None = None, max_sources: int = 4) -> str:
+    """Generate source-grounded study output from indexed documents.
+
+    Args:
+        db_path: Absolute or relative path to the SQLite database.
+        prompt: User prompt used for retrieval scoring and output mode detection.
+        selected_doc_id: Optional active document ID to boost retrieval ranking.
+        max_sources: Maximum number of documents to cite in the final response.
+
+    Returns:
+        A citation-backed study response string, or one of the sentinel values
+        `NO_DOCS_SENTINEL` / `NO_MATCH_SENTINEL` when grounded output is unavailable.
+    """
     docs = _load_docs(db_path)
     if not docs:
-        return "No indexed documents available. Ingest cases first, then retry."
+        return NO_DOCS_SENTINEL
 
     query_terms = set(_terms(prompt))
     scored = sorted(
@@ -186,7 +206,9 @@ def generate_study_response(db_path: str, prompt: str, selected_doc_id: str | No
         key=lambda x: x[1],
         reverse=True,
     )
-    top_docs = [doc for doc, score in scored if score > 0][:max_sources] or [docs[0]]
+    top_docs = [doc for doc, score in scored if score > 0][:max_sources]
+    if not top_docs:
+        return NO_MATCH_SENTINEL
     mode = _detect_mode(prompt)
 
     if mode == "brief":
