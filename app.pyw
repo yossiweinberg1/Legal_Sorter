@@ -1833,22 +1833,19 @@ class LegalSorterApp:
                     return
 
                 row_values = tree.item(selected_item[0], "values") or []
+                ref_no = row_values[1] if len(row_values) > 1 else None
                 source_url = row_values[3] if len(row_values) > 3 else None
 
-                if not source_url or not isinstance(source_url, str):
-                    sim_label.config(text="Error: Selected entry has no source URL.", foreground="red")
+                target_label = ref_no or source_url
+                if not target_label or not isinstance(target_label, str):
+                    sim_label.config(text="Error: Selected entry has no searchable identifier.", foreground="red")
                     return
 
-                match = re.search(r'#(\d+)$', source_url)
-                if not match:
-                    sim_label.config(text="Error: Selected entry has an unexpected source URL format.", foreground="red")
-                    return
-
-                opinion_id = match.group(1)
-                target_filename = f"bulk_{opinion_id}.txt"
+                match = re.search(r'#(\d+)$', source_url or "")
+                opinion_id = match.group(1) if match else (ref_no or target_label)
 
                 try:
-                    result = get_similar_cases(target_filename, top_n=3)
+                    result = get_similar_cases(target_label, top_n=3)
                 except Exception as e:
                     sim_label.config(text=f"Matrix Error: {e}", foreground="#e74c3c")
                     return
@@ -1864,8 +1861,14 @@ class LegalSorterApp:
                     display_lines = [f"Top conceptual legal matches for Case Target #{opinion_id}:"]
                     for i, match_data in enumerate(result["matches"]):
                         confidence_percentage = int(match_data.get("score", 0) * 100)
+                        match_label = (
+                            match_data.get("ref_no")
+                            or match_data.get("filename")
+                            or match_data.get("label")
+                            or "?"
+                        )
                         display_lines.append(
-                            f" [{i+1}] Filename: {match_data.get('filename','?')} ---> Structural Match Strength: {confidence_percentage}%"
+                            f" [{i+1}] Match: {match_label} ---> Structural Match Strength: {confidence_percentage}%"
                         )
                     sim_label.config(text="\n".join(display_lines), font=("Consolas", 10, "normal"), foreground="#2c3e50")
 
