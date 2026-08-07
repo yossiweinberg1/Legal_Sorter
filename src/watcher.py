@@ -7,6 +7,8 @@ import random
 from collections import deque
 import logging
 import json  # ✅ Fixed missing import used by sidecar extraction
+import hashlib
+import shutil
 import sys
 import os
 from pathlib import Path
@@ -43,6 +45,7 @@ from . import extractor
 from . import tagger
 from . import organizer
 from . import analyzer 
+from . import audit
 from .database import DB
 
 log = logging.getLogger(__name__)
@@ -227,14 +230,102 @@ def _load_sidecar_url(file_path: str) -> str | None:
     """Reads the sidecar to get the source_url, but leaves it intact in case of a crash."""
     return _load_sidecar(file_path).get("source_url")
 
+
+def _source_fingerprint(file_path: str, source_url: str | None = None) -> str:
+    p = Path(file_path)
+    parts = [str(p.resolve())]
+    try:
+        st = p.stat()
+        parts.extend([str(st.st_size), str(st.st_mtime_ns)])
+    except Exception:
+        pass
+    if source_url:
+        parts.append(source_url.strip())
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _job_id_for_path(file_path: str, source_url: str | None = None) -> str:
+    return _source_fingerprint(file_path, source_url)[:24]
+
+
+def _quarantine_file(file_path: str, cfg: dict, job_id: str) -> str | None:
+    p = Path(file_path)
+    if not p.exists():
+        return None
+    quarantine_root = Path(str(cfg.get("production", {}).get("quarantine_folder", "quarantine")))
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+    dest = quarantine_root / f"{job_id}_{p.name}"
+    shutil.move(str(p), dest)
+    sidecar = Path(str(file_path) + ".meta.json")
+    if sidecar.exists():
+        shutil.move(str(sidecar), str(dest) + ".meta.json")
+    return str(dest)
+
+
+def _record_job_failure(
+    db: DB,
+    cfg: dict,
+    *,
+    job_id: str,
+    file_path: str,
+    source_url: str | None,
+    source_fingerprint: str,
+    error_type: str,
+    error_details: str,
+    quarantine: bool = True,
+) -> str | None:
+    quarantined_path = _quarantine_file(file_path, cfg, job_id) if quarantine else None
+    db.upsert_ingestion_job(
+        job_id=job_id,
+        source_path=file_path,
+        source_url=source_url,
+        state="quarantined" if quarantined_path else "failed",
+        source_fingerprint=source_fingerprint,
+        quarantined_path=quarantined_path,
+        error_type=error_type,
+        error_details=error_details,
+    )
+    audit.log_event(
+        cfg,
+        "ingestion.quarantined" if quarantined_path else "ingestion.failed",
+        details={
+            "job_id": job_id,
+            "source_path": file_path,
+            "source_url": source_url,
+            "error_type": error_type,
+            "quarantined_path": quarantined_path,
+        },
+        status="quarantined" if quarantined_path else "failed",
+    )
+    return quarantined_path
+
 def process_file(file_path: str, cfg: dict, db: DB):
     p = Path(file_path)
+    sidecar_data = _load_sidecar(file_path)
+    source_url = sidecar_data.get("source_url")
+    source_fingerprint = _source_fingerprint(file_path, source_url)
+    job_id = _job_id_for_path(file_path, source_url)
+
     if p.suffix.lower() not in SUPPORTED_EXTS:
         return
 
+    db.upsert_ingestion_job(
+        job_id=job_id,
+        source_path=str(p),
+        source_url=source_url,
+        state="processing",
+        source_fingerprint=source_fingerprint,
+        source_mtime=str(getattr(p.stat(), "st_mtime_ns", "")),
+        increment_attempt=True,
+    )
+
     if p.suffix.lower() == ".pdf" and not is_valid_pdf(p):
         log.warning(f"[GUARDIAN] {p.name} is a fake PDF/API error block. Purging physical file.")
-        p.unlink(missing_ok=True)
+        _record_job_failure(
+            db, cfg, job_id=job_id, file_path=str(p), source_url=source_url,
+            source_fingerprint=source_fingerprint, error_type="Invalid PDF",
+            error_details="File did not match PDF magic header.",
+        )
         return
 
     doc_id = organizer.compute_id(file_path)
@@ -242,17 +333,27 @@ def process_file(file_path: str, cfg: dict, db: DB):
         log.info(f"Already processed (dedup): {p.name} -> {doc_id[:12]}")
         p.unlink(missing_ok=True)
         Path(str(file_path) + ".meta.json").unlink(missing_ok=True)
+        db.upsert_ingestion_job(
+            job_id=job_id,
+            source_path=str(p),
+            source_url=source_url,
+            state="completed",
+            doc_id=doc_id,
+            content_hash=doc_id,
+            source_fingerprint=source_fingerprint,
+        )
         return
-
-    sidecar_data = _load_sidecar(file_path)
-    source_url = sidecar_data.get("source_url")
     content_source = sidecar_data.get("content_source", "full_text")
 
     # --- ERR MARKER 1: FILE TOO BIG ---
     MAX_FILE_SIZE_MB = 30
     if p.stat().st_size > (MAX_FILE_SIZE_MB * 1024 * 1024):
         log_ui_error(str(p), "File Too Large", f"File exceeds {MAX_FILE_SIZE_MB}MB safety limit.", source_url)
-        p.unlink(missing_ok=True)
+        _record_job_failure(
+            db, cfg, job_id=job_id, file_path=str(p), source_url=source_url,
+            source_fingerprint=source_fingerprint, error_type="File Too Large",
+            error_details=f"File exceeds {MAX_FILE_SIZE_MB}MB safety limit.",
+        )
         return
 
     text_content = ""
@@ -270,8 +371,11 @@ def process_file(file_path: str, cfg: dict, db: DB):
         import traceback
         error_trace = traceback.format_exc().strip().split('\n')[-1]
         log_ui_error(str(p), "Extraction Crash", f"{str(e)} | Trace: {error_trace}", source_url)
-        p.unlink(missing_ok=True) 
-        Path(str(file_path) + ".meta.json").unlink(missing_ok=True)
+        _record_job_failure(
+            db, cfg, job_id=job_id, file_path=str(p), source_url=source_url,
+            source_fingerprint=source_fingerprint, error_type="Extraction Crash",
+            error_details=f"{str(e)} | Trace: {error_trace}",
+        )
         return
 
     # --- ERR MARKER 3: DEAD END (No Text + No URL) OR STUB ---
@@ -279,8 +383,11 @@ def process_file(file_path: str, cfg: dict, db: DB):
         if not source_url:
             # Complete failure: unreadable and no link to fallback on
             log_ui_error(str(p), "Dead End Document", "Document contains no readable text and lacks a source URL for manual review.", source_url)
-            p.unlink(missing_ok=True)
-            Path(str(file_path) + ".meta.json").unlink(missing_ok=True)
+            _record_job_failure(
+                db, cfg, job_id=job_id, file_path=str(p), source_url=source_url,
+                source_fingerprint=source_fingerprint, error_type="Dead End Document",
+                error_details="Document contains no readable text and lacks a source URL for manual review.",
+            )
             return
             
         else:
@@ -326,8 +433,11 @@ def process_file(file_path: str, cfg: dict, db: DB):
             f"[SANITY FAIL] {p.name} rejected — {sanity_reason}. "
             "File purged; document will not be indexed."
         )
-        p.unlink(missing_ok=True)
-        Path(str(file_path) + ".meta.json").unlink(missing_ok=True)
+        _record_job_failure(
+            db, cfg, job_id=job_id, file_path=str(p), source_url=source_url,
+            source_fingerprint=source_fingerprint, error_type="Sanity Check Failed",
+            error_details=f"LLM rejected content as non-legal: {sanity_reason}",
+        )
         return
     log.info(f"  [SANITY OK] {p.name} — {sanity_reason}")
 
@@ -361,6 +471,7 @@ def process_file(file_path: str, cfg: dict, db: DB):
         tags.entities, tags.citations, tags.keywords, text_content,
         source_url=source_url, virtual_folder=virtual_folder,
         content_source=content_source, sanity_check_passed=1,
+        source_fingerprint=source_fingerprint,
     )
 
     ref_no = db.assign_ref_no(doc_id)
@@ -392,7 +503,33 @@ def process_file(file_path: str, cfg: dict, db: DB):
         p.unlink(missing_ok=True)
         Path(str(file_path) + ".meta.json").unlink(missing_ok=True)
         db.mark_deleted_original(doc_id)
+        db.upsert_ingestion_job(
+            job_id=job_id,
+            source_path=str(p),
+            source_url=source_url,
+            state="completed",
+            doc_id=doc_id,
+            content_hash=doc_id,
+            source_fingerprint=source_fingerprint,
+        )
+        audit.log_event(
+            cfg,
+            "ingestion.completed",
+            details={"job_id": job_id, "doc_id": doc_id, "ref_no": ref_no, "source_url": source_url},
+        )
         log.info(f"Done: {p.name} -> {ref_no} [{virtual_folder}] (metadata indexed, original deleted)")
+    else:
+        db.upsert_ingestion_job(
+            job_id=job_id,
+            source_path=str(p),
+            source_url=source_url,
+            state="failed",
+            doc_id=doc_id,
+            content_hash=doc_id,
+            source_fingerprint=source_fingerprint,
+            error_type="Archive Write Failed",
+            error_details="Failed to write archive brief file.",
+        )
 
 
 def scan_once(cfg: dict, db: DB):
@@ -401,7 +538,46 @@ def scan_once(cfg: dict, db: DB):
         return
     for f in pull_folder.iterdir():
         if f.is_file() and not f.name.endswith(".meta.json") and f.parent.name != "manual_review":
+            source_url = _load_sidecar_url(str(f))
+            db.upsert_ingestion_job(
+                job_id=_job_id_for_path(str(f), source_url),
+                source_path=str(f),
+                source_url=source_url,
+                state="queued",
+                source_fingerprint=_source_fingerprint(str(f), source_url),
+                source_mtime=str(getattr(f.stat(), "st_mtime_ns", "")),
+            )
             process_file(str(f), cfg, db)
+
+
+def replay_quarantined_job(cfg: dict, db: DB, job_id: str) -> dict:
+    job = db.get_ingestion_job(job_id)
+    if not job:
+        raise ValueError(f"Unknown ingestion job: {job_id}")
+    quarantined_path = job.get("quarantined_path")
+    if not quarantined_path:
+        raise ValueError(f"Ingestion job {job_id} has no quarantined file to replay.")
+    src = Path(quarantined_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Quarantined file not found: {src}")
+    dest = Path(cfg["pull_folder"]) / src.name.split("_", 1)[-1]
+    shutil.copy2(src, dest)
+    sidecar = Path(str(src) + ".meta.json")
+    if sidecar.exists():
+        shutil.copy2(sidecar, str(dest) + ".meta.json")
+    db.upsert_ingestion_job(
+        job_id=job_id,
+        source_path=str(dest),
+        source_url=job.get("source_url"),
+        state="queued",
+        source_fingerprint=job.get("source_fingerprint"),
+        quarantined_path=quarantined_path,
+        error_type=None,
+        error_details=None,
+    )
+    audit.log_event(cfg, "ingestion.replayed", details={"job_id": job_id, "source_path": str(dest)})
+    process_file(str(dest), cfg, db)
+    return db.get_ingestion_job(job_id) or {}
 
 
 def auto_feed_queue(cfg: dict, db: DB):

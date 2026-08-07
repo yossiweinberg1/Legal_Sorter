@@ -18,6 +18,8 @@ class ConfigTests(unittest.TestCase):
         os.environ.pop("COURTLISTENER_API_TOKEN", None)
         os.environ.pop("COURTLISTENER_API_TOKENS", None)
         os.environ.pop("COURTLISTENER_BASE_URL", None)
+        os.environ.pop("LEGAL_SORTER_API_KEYS", None)
+        os.environ.pop("LEGAL_SORTER_AUTH_ENABLED", None)
 
     def _write_cfg(self, body: str) -> Path:
         path = Path(self.tmp.name) / "config.yaml"
@@ -88,6 +90,25 @@ courtlistener:
         self.assertEqual(cfg["production"]["quality_gate"]["citation_f1_min"], 0.70)
         self.assertEqual(cfg["production"]["quality_gate"]["entity_f1_min"], 0.60)
         self.assertIn("production.support_email is not set.", cfg.get("_warnings", []))
+
+    def test_auth_env_override_parses_role_key_pairs(self):
+        base = Path(self.tmp.name)
+        cfg_path = self._write_cfg(
+            f"""
+pull_folder: "{base / 'pull4'}"
+index_folder: "{base / 'index4'}"
+pending_folder: "{base / 'pending4'}"
+courtlistener:
+  base_url: "https://example.com"
+  api_tokens: []
+"""
+        )
+        os.environ["LEGAL_SORTER_AUTH_ENABLED"] = "true"
+        os.environ["LEGAL_SORTER_API_KEYS"] = "admin:secret-a,reader:secret-b"
+        cfg = cfgmod.load_config(str(cfg_path))
+        self.assertTrue(cfg["auth"]["enabled"])
+        self.assertEqual(cfg["auth"]["api_keys"][0]["role"], "admin")
+        self.assertEqual(cfg["auth"]["api_keys"][1]["role"], "reader")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
-from src.backup import create_backup
+from src.backup import create_backup, restore_backup
 
 
 class BackupTests(unittest.TestCase):
@@ -25,8 +25,13 @@ class BackupTests(unittest.TestCase):
             with ZipFile(out, "r") as zf:
                 names = set(zf.namelist())
             self.assertIn("index/legal_sorter.db", names)
+            self.assertIn("manifest.json", names)
+
+            restored = base / "restored-index"
+            result = restore_backup(str(out), target_index_folder=str(restored))
+            self.assertTrue(result["verified_ok"])
+            self.assertTrue((restored / "legal_sorter.db").exists())
 
 
 if __name__ == "__main__":
     unittest.main()
-
