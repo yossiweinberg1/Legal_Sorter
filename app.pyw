@@ -1842,7 +1842,7 @@ class LegalSorterApp:
                     return
 
                 match = re.search(r'#(\d+)$', source_url or "")
-                opinion_id = match.group(1) if match else (ref_no or target_label)
+                case_label = match.group(1) if match else (ref_no or target_label)
 
                 try:
                     result = get_similar_cases(target_label, top_n=3)
@@ -1854,11 +1854,11 @@ class LegalSorterApp:
                     sim_label.config(text=f"Matrix Error: {result['error']}", foreground="#e74c3c")
                 elif not result.get("matches"):
                     sim_label.config(
-                        text=f"Case ID #{opinion_id} Loaded: No matching concepts discovered in current local index batch.",
+                        text=f"Case {case_label} Loaded: No matching concepts discovered in current local index batch.",
                         foreground="#d35400",
                     )
                 else:
-                    display_lines = [f"Top conceptual legal matches for Case Target #{opinion_id}:"]
+                    display_lines = [f"Top conceptual legal matches for: {case_label}:"]
                     for i, match_data in enumerate(result["matches"]):
                         confidence_percentage = int(match_data.get("score", 0) * 100)
                         match_label = (
