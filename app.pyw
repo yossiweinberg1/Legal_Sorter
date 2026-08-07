@@ -1881,7 +1881,7 @@ class LegalSorterApp:
                     return
 
                 match = re.search(r'#(\d+)$', source_url or "")
-                case_label = match.group(1) if match else (ref_no or target_label)
+                case_label = ref_no or (match.group(1) if match else target_label)
 
                 try:
                     result = get_similar_cases(target_label, top_n=3)
@@ -1897,7 +1897,7 @@ class LegalSorterApp:
                         foreground="#d35400",
                     )
                 else:
-                    display_lines = [f"Top conceptual legal matches for: {case_label}:"]
+                    display_lines = [f"Top conceptual legal matches for {case_label}:"]
                     for i, match_data in enumerate(result["matches"]):
                         confidence_percentage = int(match_data.get("score", 0) * 100)
                         match_label = (
