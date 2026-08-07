@@ -1,6 +1,9 @@
 services:
   legal-sorter-web:
-    build: .
+    build:
+      context: .
+      platforms:
+        - linux/arm64
     ports:
       - "8000:8000"
     env_file:
