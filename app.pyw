@@ -1881,7 +1881,7 @@ class LegalSorterApp:
                     return
 
                 match = re.search(r'#(\d+)$', source_url or "")
-                case_label = ref_no or (match.group(1) if match else target_label)
+                case_label = ref_no or (f"bulk_{match.group(1)}.txt" if match else target_label)
 
                 try:
                     result = get_similar_cases(target_label, top_n=3)

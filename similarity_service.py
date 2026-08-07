@@ -215,11 +215,12 @@ def get_similar_cases(target_label: str, top_n: int = 5) -> dict:
 
     target_idx = _find_target_index(target_label, entries)
     if target_idx is None:
-        rebuilt, _ = build_and_cache_index()
-        if rebuilt:
-            tfidf_matrix = joblib.load(INDEX_FILE)
-            entries = _normalize_entries(joblib.load(PATHS_FILE))
-            target_idx = _find_target_index(target_label, entries)
+        rebuilt, rebuild_message = build_and_cache_index()
+        if not rebuilt:
+            return {"error": rebuild_message, "matches": []}
+        tfidf_matrix = joblib.load(INDEX_FILE)
+        entries = _normalize_entries(joblib.load(PATHS_FILE))
+        target_idx = _find_target_index(target_label, entries)
     if target_idx is None:
         return {"error": f"'{target_label}' not found in the current index.", "matches": []}
 
