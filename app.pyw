@@ -8,7 +8,7 @@ import subprocess
 import time
 import threading
 import re
-import tempfile
+import webbrowser
 from pathlib import Path
 from src.watcher import TOKEN_REGISTRY, initialize_token_registry
 from src import config as cfgmod
@@ -95,7 +95,8 @@ class LegalSorterApp:
         self.log_session_start_mark = "1.0"
         self._temp_files = [] # track temp files created by repull so we can clean them up on exit
         self.ai_stop_requested = False
-        
+        self.log_autoscroll_var = tk.BooleanVar(value=True)
+
         # Window Configurations
         self.root.title(" LegalSorter Control Center")
         self.root.geometry("1380x860")
@@ -163,6 +164,15 @@ class LegalSorterApp:
         tools_menu.add_command(label="Copy Engine Log", command=self.copy_log_action, accelerator="Ctrl+Shift+L")
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        settings_menu.add_command(label="⚙️ API Key Manager", command=self.open_api_key_manager)
+        settings_menu.add_command(label="🖥️ Create Desktop Shortcut", command=self._create_desktop_shortcut)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="Toggle Log Auto-scroll",
+                                  command=lambda: self.log_autoscroll_var.set(
+                                      not self.log_autoscroll_var.get()))
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(
             label="Keyboard Shortcuts",
@@ -172,7 +182,8 @@ class LegalSorterApp:
                 "Ctrl+R  → Sync Database\n"
                 "Ctrl+O  → Open Selected Case\n"
                 "Ctrl+Shift+C → Toggle Curation\n"
-                "Ctrl+Shift+L → Copy Log",
+                "Ctrl+Shift+L → Copy Log Since Start\n"
+                "Ctrl+Shift+K → API Key Manager",
             ),
         )
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -186,6 +197,7 @@ class LegalSorterApp:
         self.root.bind("<Control-o>", lambda _e: self.open_selected_case())
         self.root.bind("<Control-Shift-C>", lambda _e: self.toggle_curation_deck())
         self.root.bind("<Control-Shift-L>", lambda _e: self.copy_log_action())
+        self.root.bind("<Control-Shift-K>", lambda _e: self.open_api_key_manager())
 
     def focus_search(self):
         """Moves input focus to the explorer search box."""
@@ -287,10 +299,86 @@ class LegalSorterApp:
         base = cfg.get("courtlistener", {}).get("base_url", "https://www.courtlistener.com/api/rest/v4")
         return CourtListenerClient(api_token=token, base_url=base)
 
+    def _show_case_viewer(self, title: str, content: str, source_url: str = ""):
+        """Opens a styled read-only Toplevel window to display case text."""
+        win = tk.Toplevel(self.root)
+        win.title(f"📄 {title}")
+        win.geometry("900x700")
+        win.minsize(640, 480)
+        p = self._pal
+
+        # Header bar
+        header = ttk.Frame(win, padding=(10, 6))
+        header.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(header, text=title, font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
+
+        # Toolbar
+        toolbar = ttk.Frame(win, padding=(6, 2))
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+
+        copy_status = ttk.Label(toolbar, text="", foreground="#2ecc71", font=("Segoe UI", 9))
+
+        def _copy_all():
+            win.clipboard_clear()
+            win.clipboard_append(content)
+            copy_status.config(text="✅ Copied to clipboard.")
+            win.after(3000, lambda: copy_status.config(text=""))
+
+        def _copy_selection():
+            try:
+                sel = text_widget.get(tk.SEL_FIRST, tk.SEL_LAST)
+            except tk.TclError:
+                sel = ""
+            if sel:
+                win.clipboard_clear()
+                win.clipboard_append(sel)
+                copy_status.config(text=f"✅ Copied {len(sel)} chars.")
+                win.after(3000, lambda: copy_status.config(text=""))
+
+        def _open_url():
+            if source_url and source_url.startswith("http"):
+                webbrowser.open(source_url)
+
+        ttk.Button(toolbar, text="📋 Copy All", command=_copy_all).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(toolbar, text="📋 Copy Selection", command=_copy_selection).pack(side=tk.LEFT, padx=(0, 4))
+        if source_url and source_url.startswith("http"):
+            ttk.Button(toolbar, text="🌐 Open Source URL", command=_open_url).pack(side=tk.LEFT, padx=(0, 4))
+        copy_status.pack(side=tk.LEFT, padx=8)
+        ttk.Button(toolbar, text="✖ Close", command=win.destroy).pack(side=tk.RIGHT)
+
+        # Separator
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=6)
+
+        # Text body
+        text_frame = ttk.Frame(win)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        text_widget = tk.Text(
+            text_frame, wrap=tk.WORD, font=("Consolas", 10),
+            bg="#1a1a2e", fg="#e0e0f0",
+            insertbackground="#e0e0f0", relief="flat", borderwidth=0,
+            padx=12, pady=8,
+        )
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        vsb = ttk.Scrollbar(text_frame, command=text_widget.yview)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.config(yscrollcommand=vsb.set)
+
+        text_widget.insert(tk.END, content)
+        text_widget.config(state=tk.DISABLED)
+
+        # Status bar at bottom
+        status_bar = ttk.Label(win, text=f"  {len(content):,} characters  |  {len(content.splitlines()):,} lines",
+                               font=("Segoe UI", 8), foreground="gray", anchor="w")
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        win.focus_set()
+
     def open_case_and_repull(self, doc_id: str):
         """
-        Unified opener: Checks for a valid CourtListener URL to repull. 
-        If bulk data or missing URL, it instantly extracts the text directly from the database.
+        Unified opener: Checks for a valid CourtListener URL to repull.
+        If bulk data or missing URL, it shows the text directly in the app viewer.
         """
         if not self.db_path:
             return False, "Database path not configured."
@@ -309,48 +397,37 @@ class LegalSorterApp:
 
         source_url, ref_no, text_content = row
 
-        # FALLBACK: If bulk data or missing URL, reconstruct text file from DB
+        # FALLBACK: If bulk data or missing URL, show text in the in-app viewer
         if not source_url or source_url.startswith("bulk://"):
             if not text_content:
                 return False, "No URL available and no text archived in database."
-            
-            tmp_path = os.path.join(tempfile.gettempdir(), f"archive_{doc_id[:12]}.txt")
-            try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    f.write(text_content)
-                
-                if tmp_path not in self._temp_files:
-                    self._temp_files.append(tmp_path)
+            label = ref_no or doc_id
+            self.root.after(0, lambda: self._show_case_viewer(
+                title=label, content=text_content, source_url=source_url or ""
+            ))
+            return True, label
 
-                if os.name == "nt":
-                    os.startfile(tmp_path)
-                else:
-                    opener = "open" if sys.platform == "darwin" else "xdg-open"
-                    subprocess.Popen([opener, tmp_path])
-                
-                return True, tmp_path
-            except Exception as e:
-                return False, f"Failed to generate DB text file: {e}"
-
-        # NORMAL REPULL: If standard HTTP URL exists, use CourtListenerClient
+        # NORMAL REPULL: If standard HTTP URL exists, download and show in viewer
         client = self.make_cl_client()
         ok, result = client.download_to_temp(source_url, ref_no)
         if not ok:
             return False, result
 
         tmp_path = result
-        try:
-            if os.name == "nt":
-                os.startfile(tmp_path)
-            else:
-                opener = "open" if sys.platform == "darwin" else "xdg-open"
-                subprocess.Popen([opener, tmp_path])
-        except Exception as e:
-            return False, f"Failed to open file: {e}"
-
         if tmp_path not in self._temp_files:
             self._temp_files.append(tmp_path)
 
+        # Read the downloaded file and display in-app
+        try:
+            with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
+                file_content = fh.read()
+        except Exception:
+            file_content = f"[Binary or unreadable file — saved to: {tmp_path}]"
+
+        label = ref_no or doc_id
+        self.root.after(0, lambda: self._show_case_viewer(
+            title=label, content=file_content, source_url=source_url
+        ))
         return True, tmp_path
 
     def cleanup_temp_files(self):
@@ -658,8 +735,40 @@ class LegalSorterApp:
                                    text=" Live Engine Output ", padding=6)
         self.paned_window.add(log_frame)
 
+        # Log toolbar: autoscroll + copy buttons + status flash label
+        log_toolbar = ttk.Frame(log_frame)
+        log_toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+
+        ttk.Checkbutton(
+            log_toolbar, text="Auto-scroll",
+            variable=self.log_autoscroll_var,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Button(
+            log_toolbar, text="📋 Copy Since Start",
+            command=self.copy_log_since_start,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        ttk.Button(
+            log_toolbar, text="📋 Copy All",
+            command=self.copy_full_log,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        ttk.Button(
+            log_toolbar, text="🗑 Clear Log",
+            command=self._clear_log,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        self._log_status_label = ttk.Label(
+            log_toolbar, text="", foreground="#2ecc71", font=("Segoe UI", 9)
+        )
+        self._log_status_label.pack(side=tk.LEFT, padx=8)
+
+        text_row = ttk.Frame(log_frame)
+        text_row.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
         self.log_text = tk.Text(
-            log_frame, wrap=tk.WORD, font=("Consolas", 10),
+            text_row, wrap=tk.WORD, font=("Consolas", 10),
             height=10, bg="#12121e", fg="#c9cfe8",
             insertbackground="#c9cfe8", relief="flat", borderwidth=0
         )
@@ -675,7 +784,7 @@ class LegalSorterApp:
         self.log_text.tag_config("system",  foreground="#666888")
         self.log_text.insert(tk.END, "[System Idle] Ready to stream updates.\n")
 
-        log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        log_scroll = ttk.Scrollbar(text_row, command=self.log_text.yview)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=log_scroll.set)
 
@@ -691,9 +800,9 @@ class LegalSorterApp:
         queue_frame = ttk.LabelFrame(parent, text=" Network Control & Priority Targets ")
         queue_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
 
-        self.queue_text = self._make_text(queue_frame, width=28, height=18,
+        self.queue_text = self._make_text(queue_frame, width=28, height=10,
                                           font=("Consolas", 10))
-        self.queue_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 6))
+        self.queue_text.pack(side=tk.TOP, fill=tk.X, expand=False, pady=(0, 4))
         self.queue_text.insert(tk.END, "Queue empty.")
         self.queue_text.config(state=tk.DISABLED)
 
@@ -762,13 +871,32 @@ class LegalSorterApp:
                                         padding=8)
         insights_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        self.insights_text = self._make_text(insights_frame, wrap=tk.WORD,
+        # Brief toolbar
+        brief_toolbar = ttk.Frame(insights_frame)
+        brief_toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        ttk.Button(
+            brief_toolbar, text="📋 Copy Brief",
+            command=self._copy_case_brief,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(
+            brief_toolbar, text="📄 Open Full Text",
+            command=self.open_selected_case,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        self._brief_status_label = ttk.Label(
+            brief_toolbar, text="", foreground="#2ecc71", font=("Segoe UI", 9)
+        )
+        self._brief_status_label.pack(side=tk.LEFT, padx=8)
+
+        brief_text_row = ttk.Frame(insights_frame)
+        brief_text_row.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.insights_text = self._make_text(brief_text_row, wrap=tk.WORD,
                                              font=("Segoe UI", 11))
         self.insights_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.insights_text.insert(tk.END,
             "Select a case from the Explorer matrix to view its brief.")
 
-        ins_scroll = ttk.Scrollbar(insights_frame, command=self.insights_text.yview)
+        ins_scroll = ttk.Scrollbar(brief_text_row, command=self.insights_text.yview)
         ins_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.insights_text.config(yscrollcommand=ins_scroll.set)
 
@@ -1090,7 +1218,8 @@ class LegalSorterApp:
                 console_tag = "info"
             self.log_text.config(state=tk.NORMAL)
             self.log_text.insert(tk.END, f"\n[Engine] {text_string}", console_tag)
-            self.log_text.see(tk.END)
+            if self.log_autoscroll_var.get():
+                self.log_text.see(tk.END)
             self.log_text.config(state=tk.DISABLED)
         self.root.after(0, append_action)
 
@@ -1339,6 +1468,116 @@ class LegalSorterApp:
         TOKEN_REGISTRY[token]["enabled"] = is_checked
         status = "ONLINE" if is_checked else "OFFLINE"
         self.write_to_engine_log(f"[SYSTEM] Token ending in ...{token[-6:]} manually toggled {status}.\n")
+
+    def _create_desktop_shortcut(self):
+        """Runs create_shortcut.py to install a desktop icon for LegalSorter."""
+        shortcut_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "create_shortcut.py")
+        if not os.path.exists(shortcut_script):
+            messagebox.showerror("Create Shortcut", "create_shortcut.py not found in the application directory.")
+            return
+        try:
+            result = subprocess.run(
+                [sys.executable, shortcut_script],
+                capture_output=True, text=True, timeout=15,
+            )
+            output = (result.stdout + result.stderr).strip()
+            if result.returncode == 0:
+                messagebox.showinfo("Create Desktop Shortcut", f"Shortcut created successfully!\n\n{output}")
+            else:
+                messagebox.showerror("Create Desktop Shortcut", f"Script exited with errors:\n\n{output}")
+        except Exception as e:
+            messagebox.showerror("Create Desktop Shortcut", f"Failed to run shortcut creator: {e}")
+
+    def open_api_key_manager(self):
+        """Opens a full-screen-friendly dialog to view and toggle all registered API keys."""
+        win = tk.Toplevel(self.root)
+        win.title("⚙️ API Key Manager")
+        win.geometry("560x440")
+        win.resizable(True, True)
+        win.grab_set()
+
+        ttk.Label(win, text="API Key Manager", font=("Segoe UI", 13, "bold")).pack(
+            anchor="w", padx=16, pady=(14, 4))
+        ttk.Label(
+            win,
+            text="Enable or disable individual API tokens used by the crawler engine.\n"
+                 "Changes take effect immediately — no restart required.",
+            font=("Segoe UI", 9),
+            foreground="gray",
+            justify="left",
+        ).pack(anchor="w", padx=16, pady=(0, 10))
+
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        scroll_frame_outer = ttk.Frame(win)
+        scroll_frame_outer.pack(fill=tk.BOTH, expand=True, padx=12)
+
+        canvas = tk.Canvas(scroll_frame_outer, borderwidth=0, highlightthickness=0)
+        vsb = ttk.Scrollbar(scroll_frame_outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = ttk.Frame(canvas)
+        canvas_win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(canvas_win, width=canvas.winfo_width())
+
+        inner.bind("<Configure>", _on_configure)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_win, width=e.width))
+
+        try:
+            cfg = cfgmod.load_config()
+            initialize_token_registry(cfg)
+        except Exception:
+            pass
+
+        if not TOKEN_REGISTRY:
+            ttk.Label(inner, text="No API tokens found in registry.", foreground="gray").pack(padx=16, pady=20)
+        else:
+            for token, meta in TOKEN_REGISTRY.items():
+                row = ttk.Frame(inner, padding=(8, 4))
+                row.pack(fill=tk.X, pady=2)
+
+                masked = f"...{token[-8:]}" if len(token) > 8 else token
+                var = tk.BooleanVar(value=meta["enabled"])
+
+                cb = ttk.Checkbutton(
+                    row,
+                    text=f"Key:  {masked}",
+                    variable=var,
+                    command=lambda t=token, v=var: self.execute_token_toggle(t, v),
+                    width=30,
+                )
+                cb.pack(side=tk.LEFT)
+
+                status_lbl = ttk.Label(
+                    row,
+                    text="● ACTIVE" if meta["enabled"] else "○ DISABLED",
+                    foreground="#2ecc71" if meta["enabled"] else "#aaaaaa",
+                    font=("Segoe UI", 9),
+                )
+                status_lbl.pack(side=tk.LEFT, padx=8)
+
+                def _make_refresh(v=var, lbl=status_lbl, t=token):
+                    def _refresh():
+                        TOKEN_REGISTRY[t]["enabled"] = v.get()
+                        lbl.config(
+                            text="● ACTIVE" if v.get() else "○ DISABLED",
+                            foreground="#2ecc71" if v.get() else "#aaaaaa",
+                        )
+                        status = "ONLINE" if v.get() else "OFFLINE"
+                        self.write_to_engine_log(
+                            f"[SYSTEM] Token ending in ...{t[-6:]} toggled {status}.\n"
+                        )
+                    return _refresh
+
+                cb.config(command=_make_refresh())
+
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=12, pady=8)
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 12))
 
     def sync_database(self):
         """Queries database stats and triggers visual synchronization loops."""
@@ -1725,6 +1964,10 @@ class LegalSorterApp:
             else:
                 self.log_text.insert(tk.END, line)
 
+        if self.log_autoscroll_var.get():
+            self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+
     def copy_log_since_start(self):
         """Copies everything printed to the log since the crawler was last started."""
         try:
@@ -1733,12 +1976,55 @@ class LegalSorterApp:
             content = self.log_text.get("1.0", "end-1c")
    
         if not content.strip():
-            messagebox.showinfo("Copy Log", "Nothing has been logged since the last start yet.")
+            self._flash_log_status("Nothing logged since last start.")
             return
 
         self.root.clipboard_clear()
         self.root.clipboard_append(content)
-        messagebox.showinfo("Copy Log", "Log copied to clipboard.")
+        self._flash_log_status(f"✅ Copied {len(content.splitlines())} lines to clipboard.")
+
+    def copy_full_log(self):
+        """Copies the entire engine log to the clipboard."""
+        content = self.log_text.get("1.0", "end-1c")
+        if not content.strip():
+            self._flash_log_status("Log is empty.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self._flash_log_status(f"✅ Full log copied ({len(content.splitlines())} lines).")
+
+    def _flash_log_status(self, msg: str, duration_ms: int = 3000):
+        """Temporarily shows a status message in the log toolbar label."""
+        try:
+            self._log_status_label.config(text=msg)
+            self.root.after(duration_ms, lambda: self._log_status_label.config(text=""))
+        except Exception:
+            pass
+
+    def _clear_log(self):
+        """Clears all text from the engine log panel."""
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.config(state=tk.DISABLED)
+        self._flash_log_status("Log cleared.")
+
+    def _copy_case_brief(self):
+        """Copies the current case brief panel content to the clipboard."""
+        content = self.insights_text.get("1.0", "end-1c").strip()
+        if not content or content.startswith("Select a case"):
+            try:
+                self._brief_status_label.config(text="No brief loaded.")
+                self.root.after(3000, lambda: self._brief_status_label.config(text=""))
+            except Exception:
+                pass
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        try:
+            self._brief_status_label.config(text="✅ Brief copied to clipboard.")
+            self.root.after(3000, lambda: self._brief_status_label.config(text=""))
+        except Exception:
+            pass
 
     def open_database_viewer(self):
         """Lightweight built-in browser for the documents table."""

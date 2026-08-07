@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=LegalSorter
+GenericName=Legal Case Organizer
+Comment=AI-powered legal case indexer and sorter
+Exec=bash -c 'cd "%k" && python app.pyw'
+Icon=legal-sorter
+Terminal=false
+Categories=Office;Science;
+Keywords=legal;law;cases;sorter;
+StartupNotify=true
