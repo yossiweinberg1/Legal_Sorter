@@ -24,8 +24,14 @@ LEDGER_FILE = "ui_extraction_errors.json"
 
 
 def _safe_console_print(message: str) -> None:
-    if sys.stdout is not None:
-        print(message)
+    stream = sys.stdout
+    if stream is None:
+        return
+    try:
+        stream.write(f"{message}\n")
+        stream.flush()
+    except Exception:
+        pass
 
 
 def _subprocess_creationflags() -> int:
@@ -1882,9 +1888,10 @@ class LegalSorterApp:
 
                 match = re.search(r'#(\d+)$', source_url or "")
                 case_label = ref_no or (f"bulk_{match.group(1)}.txt" if match else target_label)
+                lookup_label = case_label or target_label
 
                 try:
-                    result = get_similar_cases(target_label, top_n=3)
+                    result = get_similar_cases(lookup_label, top_n=3)
                 except Exception as e:
                     sim_label.config(text=f"Matrix Error: {e}", foreground="#e74c3c")
                     return
