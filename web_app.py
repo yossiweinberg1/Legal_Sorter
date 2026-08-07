@@ -201,205 +201,313 @@ def stats():
 _HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Legal Sorter — Case Archive</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Legal Sorter — Archive Console</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; }
-  body { font-family: system-ui, sans-serif; margin: 0; background: #f5f6fa; color: #1a1a2e; }
-  header { background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
-  header h1 { margin: 0; font-size: 1.4rem; }
-  .badge { background: #e94560; color: #fff; font-size: .7rem; padding: 2px 6px; border-radius: 4px; }
-  main { max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
-  .card { background: #fff; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
-  .card h2 { margin: 0 0 1rem; font-size: 1.1rem; }
-  .row { display: flex; gap: .5rem; }
-  input[type=text], textarea {
-    flex: 1; padding: .6rem .8rem; border: 1px solid #ddd; border-radius: 6px;
-    font-size: .95rem; font-family: inherit;
+  :root {
+    --bg: #0f1220;
+    --panel: #171b2e;
+    --panel-2: #1e2440;
+    --text: #e8ecff;
+    --muted: #a8b0d9;
+    --accent: #7f8cff;
+    --accent-2: #35d4a6;
+    --border: #2b345e;
+    --danger: #ff6b7a;
+    --shadow: 0 10px 30px rgba(0,0,0,.25);
   }
-  textarea { resize: vertical; min-height: 72px; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: Inter, Segoe UI, system-ui, sans-serif;
+    background: radial-gradient(circle at top, #1a2142, var(--bg) 40%);
+    color: var(--text);
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px; }
+  .hero {
+    background: linear-gradient(120deg, #1d2750, #11162b);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: var(--shadow);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .hero h1 { margin: 0 0 6px; font-size: 1.5rem; }
+  .hero p { margin: 0; color: var(--muted); }
+  .pill {
+    display: inline-block;
+    font-size: .75rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 10px;
+    color: #d8ddff;
+    background: #171e3c;
+  }
+  .grid { margin-top: 16px; display: grid; gap: 14px; grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .card {
+    background: linear-gradient(180deg, var(--panel), #13182d);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px;
+    box-shadow: var(--shadow);
+  }
+  .span-12 { grid-column: span 12; }
+  .span-8 { grid-column: span 8; }
+  .span-4 { grid-column: span 4; }
+  .stats { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+  .stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .stat .num { font-size: 1.4rem; font-weight: 700; color: var(--accent-2); }
+  .stat .label { color: var(--muted); font-size: .82rem; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  input, textarea, button {
+    font: inherit;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  input, textarea {
+    width: 100%;
+    background: #0f1530;
+    color: var(--text);
+    padding: 10px 12px;
+    outline: none;
+  }
+  textarea { min-height: 92px; resize: vertical; }
+  input:focus, textarea:focus { border-color: var(--accent); }
   button {
-    padding: .6rem 1.2rem; background: #e94560; color: #fff; border: none;
-    border-radius: 6px; cursor: pointer; font-size: .95rem; white-space: nowrap;
+    background: linear-gradient(180deg, #8b96ff, #6776ff);
+    color: #fff;
+    border: none;
+    padding: 10px 14px;
+    cursor: pointer;
+    font-weight: 600;
   }
-  button:hover { background: #c73652; }
-  button:disabled { background: #aaa; cursor: default; }
-  .results { margin-top: 1rem; }
-  .result-item {
-    border-left: 3px solid #e94560; padding: .6rem .8rem; margin-bottom: .5rem;
-    background: #fafafa; border-radius: 0 6px 6px 0;
+  button.secondary { background: #2a3158; color: #d8defe; }
+  button:disabled { opacity: .6; cursor: default; }
+  .results { margin-top: 10px; display: grid; gap: 8px; }
+  .result {
+    background: #101735;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    padding: 10px;
   }
-  .result-item .ref { font-weight: bold; color: #e94560; }
-  .result-item .folder { font-size: .8rem; color: #666; margin: 2px 0; }
-  .result-item .snippet { font-size: .85rem; color: #444; margin-top: 4px; }
-  .answer-box {
-    background: #f0f4ff; border: 1px solid #c5d0f0; border-radius: 8px;
-    padding: 1rem; white-space: pre-wrap; font-size: .9rem; line-height: 1.6;
+  .meta { color: var(--muted); font-size: .82rem; margin: 3px 0; }
+  .snippet { color: #d7ddff; font-size: .92rem; }
+  .answer { white-space: pre-wrap; line-height: 1.5; background: #101735; border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+  .error { color: var(--danger); }
+  .small { color: var(--muted); font-size: .82rem; }
+  a { color: #a5b2ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  @media (max-width: 980px) {
+    .span-8, .span-4 { grid-column: span 12; }
+    .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
   }
-  .sources { margin-top: .5rem; font-size: .8rem; color: #555; }
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: .5rem; }
-  .stat-item { background: #f0f4ff; border-radius: 6px; padding: .8rem; text-align: center; }
-  .stat-item .num { font-size: 1.8rem; font-weight: bold; color: #e94560; }
-  .stat-item .label { font-size: .8rem; color: #555; }
-  .error { color: #c0392b; background: #ffeaea; padding: .5rem .8rem; border-radius: 6px; }
-  .loading { color: #888; font-style: italic; }
 </style>
 </head>
 <body>
-<header>
-  <h1>⚖️ Legal Sorter</h1>
-  <span class="badge">READ-ONLY ARCHIVE</span>
-</header>
-<main>
+  <div class="wrap">
+    <section class="hero">
+      <div>
+        <span class="pill">READ-ONLY ARCHIVE</span>
+        <h1>⚖️ Legal Sorter — Archive Console</h1>
+        <p>Search indexed cases, inspect records, and ask grounded AI questions from your local archive.</p>
+      </div>
+      <div class="small">
+        API Docs: <a href="/docs" target="_blank" rel="noopener noreferrer">/docs</a>
+      </div>
+    </section>
 
-<!-- Stats banner -->
-<div class="card" id="stats-card">
-  <h2>Archive Overview</h2>
-  <div class="stat-grid" id="stats-grid"><span class="loading">Loading…</span></div>
-</div>
+    <div class="grid">
+      <section class="card span-12">
+        <h3>Archive Health</h3>
+        <div id="stats" class="stats"><span class="small">Loading...</span></div>
+      </section>
 
-<!-- Search -->
-<div class="card">
-  <h2>🔍 Full-Text Case Search</h2>
-  <div class="row">
-    <input type="text" id="search-input" placeholder='e.g.  qualified immunity  OR  "breach of contract"' />
-    <button onclick="doSearch()">Search</button>
+      <section class="card span-8">
+        <h3>Search Cases</h3>
+        <div class="row">
+          <input id="search-input" type="text" placeholder='Try: "qualified immunity" OR contract liability' />
+          <button onclick="doSearch()">Search</button>
+          <button class="secondary" onclick="clearSearch()">Clear</button>
+        </div>
+        <div id="search-results" class="results"></div>
+      </section>
+
+      <section class="card span-4">
+        <h3>Recent Cases</h3>
+        <div class="row" style="margin-bottom:8px;">
+          <input id="folder-filter" type="text" placeholder="Folder prefix (optional)" />
+          <button class="secondary" onclick="loadRecentCases()">Refresh</button>
+        </div>
+        <div id="cases-results" class="results"></div>
+      </section>
+
+      <section class="card span-12">
+        <h3>AI Assistant (RAG)</h3>
+        <p class="small">Answers are generated only from indexed case excerpts returned by retrieval.</p>
+        <textarea id="ask-input" placeholder="Ask a legal question grounded in your indexed archive"></textarea>
+        <div class="row" style="margin-top:8px;">
+          <button id="ask-btn" onclick="doAsk()">Ask AI</button>
+        </div>
+        <div id="ask-results" class="results"></div>
+      </section>
+    </div>
   </div>
-  <div class="results" id="search-results"></div>
-</div>
-
-<!-- AI Q&A -->
-<div class="card">
-  <h2>🤖 Ask the AI (RAG — grounded in indexed cases only)</h2>
-  <textarea id="ask-input" placeholder="e.g. What is the standard for qualified immunity under the Ninth Circuit?"></textarea>
-  <div class="row" style="margin-top:.5rem">
-    <button id="ask-btn" onclick="doAsk()">Ask</button>
-  </div>
-  <div class="results" id="ask-results"></div>
-</div>
-
-</main>
 
 <script>
+function escapeHtml(value) {
+  const el = document.createElement('div');
+  el.textContent = value ?? '';
+  return el.innerHTML;
+}
+
 async function loadStats() {
+  const target = document.getElementById('stats');
   try {
     const r = await fetch('/api/stats');
     const d = await r.json();
-    const grid = document.getElementById('stats-grid');
-    grid.innerHTML = `
-      <div class="stat-item"><div class="num">${d.total_cases.toLocaleString()}</div><div class="label">Indexed Cases</div></div>
-      ${d.top_folders.slice(0,5).map(f =>
-        `<div class="stat-item"><div class="num">${f.count}</div><div class="label">${f.folder||'Unsorted'}</div></div>`
-      ).join('')}
+    const top = (d.top_folders || []).slice(0, 2);
+    target.innerHTML = `
+      <div class="stat"><div class="num">${Number(d.total_cases || 0).toLocaleString()}</div><div class="label">Indexed Cases</div></div>
+      <div class="stat"><div class="num">${top[0] ? top[0].count : 0}</div><div class="label">Top Folder 1: ${escapeHtml(top[0]?.folder || 'N/A')}</div></div>
+      <div class="stat"><div class="num">${top[1] ? top[1].count : 0}</div><div class="label">Top Folder 2: ${escapeHtml(top[1]?.folder || 'N/A')}</div></div>
     `;
-  } catch(e) {
-    document.getElementById('stats-grid').innerHTML = '<span class="error">Could not load stats.</span>';
+  } catch (e) {
+    target.innerHTML = '<div class="error">Failed to load archive stats.</div>';
   }
+}
+
+function resultCard(item) {
+  const ref = escapeHtml(item.ref_no || 'N/A');
+  const folder = escapeHtml(item.virtual_folder || 'Uncategorized');
+  const snippet = escapeHtml(item.snippet || '');
+  const source = item.source_url && /^https?:\/\//i.test(item.source_url)
+    ? `<a href="${encodeURI(item.source_url)}" target="_blank" rel="noopener noreferrer">Source ↗</a>`
+    : '<span class="small">No source URL</span>';
+  return `
+    <div class="result">
+      <div><strong>${ref}</strong></div>
+      <div class="meta">📁 ${folder}</div>
+      <div class="snippet">${snippet}</div>
+      <div class="meta">${source}</div>
+    </div>
+  `;
 }
 
 async function doSearch() {
   const q = document.getElementById('search-input').value.trim();
-  if (!q) return;
-  const el = document.getElementById('search-results');
-  el.innerHTML = '<span class="loading">Searching\u2026</span>';
+  const target = document.getElementById('search-results');
+  if (!q) {
+    target.innerHTML = '<div class="small">Enter a query to search.</div>';
+    return;
+  }
+
+  target.innerHTML = '<div class="small">Searching...</div>';
   try {
     const r = await fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=20');
     const d = await r.json();
-    if (!d.results.length) { el.innerHTML = '<p>No results found.</p>'; return; }
-    el.innerHTML = d.results.map(c => {
-      const refEl = document.createElement('span');
-      refEl.className = 'ref';
-      refEl.textContent = c.ref_no || 'N/A';
+    const results = d.results || [];
+    if (!results.length) {
+      target.innerHTML = '<div class="small">No matches found.</div>';
+      return;
+    }
+    target.innerHTML = results.map(resultCard).join('');
+  } catch (e) {
+    target.innerHTML = '<div class="error">Search request failed.</div>';
+  }
+}
 
-      const folderEl = document.createElement('div');
-      folderEl.className = 'folder';
-      folderEl.textContent = '\uD83D\uDCC1 ' + (c.virtual_folder || 'Uncategorized');
+function clearSearch() {
+  document.getElementById('search-input').value = '';
+  document.getElementById('search-results').innerHTML = '';
+}
 
-      const snippetEl = document.createElement('div');
-      snippetEl.className = 'snippet';
-      snippetEl.textContent = c.snippet || '';
-
-      let anchorHtml = '';
-      if (c.source_url && /^https?:[/][/]/i.test(c.source_url)) {
-        const safeUrl = encodeURI(c.source_url);
-        anchorHtml = `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="font-size:.8rem">View Source \u2197</a>`;
-      }
-
-      return (
-        '<div class="result-item">' +
-        refEl.outerHTML +
-        folderEl.outerHTML +
-        snippetEl.outerHTML +
-        anchorHtml +
-        '</div>'
-      );
-    }).join('');
-  } catch(e) {
-    el.innerHTML = `<div class="error">Search error: ${e}</div>`;
+async function loadRecentCases() {
+  const target = document.getElementById('cases-results');
+  target.innerHTML = '<div class="small">Loading...</div>';
+  try {
+    const folder = document.getElementById('folder-filter').value.trim();
+    const qs = new URLSearchParams({ limit: '10', offset: '0' });
+    if (folder) qs.set('folder', folder);
+    const r = await fetch('/api/cases?' + qs.toString());
+    const d = await r.json();
+    const rows = d.results || [];
+    if (!rows.length) {
+      target.innerHTML = '<div class="small">No cases found.</div>';
+      return;
+    }
+    target.innerHTML = rows.map(c => `
+      <div class="result">
+        <div><strong>${escapeHtml(c.ref_no || 'N/A')}</strong></div>
+        <div class="meta">📁 ${escapeHtml(c.virtual_folder || 'Uncategorized')}</div>
+        <div class="meta">${escapeHtml(c.added_at || '')}</div>
+      </div>
+    `).join('');
+  } catch (e) {
+    target.innerHTML = '<div class="error">Failed to load case list.</div>';
   }
 }
 
 async function doAsk() {
   const q = document.getElementById('ask-input').value.trim();
-  if (!q) return;
   const btn = document.getElementById('ask-btn');
-  const el = document.getElementById('ask-results');
+  const target = document.getElementById('ask-results');
+  if (!q) {
+    target.innerHTML = '<div class="small">Enter a question first.</div>';
+    return;
+  }
+
   btn.disabled = true;
-  el.innerHTML = '<span class="loading">Consulting the archive\u2026</span>';
+  target.innerHTML = '<div class="small">Generating grounded answer...</div>';
   try {
     const r = await fetch('/api/ask', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({question: q, top_k: 5})
+      body: JSON.stringify({ question: q, top_k: 5 }),
     });
     const d = await r.json();
-    if (r.ok) {
-      // Render answer as plain text to prevent XSS from LLM output
-      const answerBox = document.createElement('div');
-      answerBox.className = 'answer-box';
-      answerBox.textContent = d.answer || '';
-
-      const sources = (d.sources||[]).map(s => {
-        const label = (s.ref_no || (s.doc_id || '').slice(0,12) || '?') +
-                      (s.virtual_folder ? ' \u2014 ' + s.virtual_folder : '');
-        let linkHtml = '';
-        if (s.source_url && /^https?:[/][/]/i.test(s.source_url)) {
-          const safeUrl = encodeURI(s.source_url);
-          linkHtml = ` <a href="${safeUrl}" target="_blank" rel="noopener noreferrer">\u2197</a>`;
-        }
-        return label + linkHtml;
-      }).join('<br>');
-
-      el.innerHTML = '';
-      el.appendChild(answerBox);
-      if (sources) {
-        const srcDiv = document.createElement('div');
-        srcDiv.className = 'sources';
-        srcDiv.innerHTML = '<b>Sources:</b><br>' + sources;
-        el.appendChild(srcDiv);
-      }
-    } else {
-      const errBox = document.createElement('div');
-      errBox.className = 'error';
-      errBox.textContent = d.detail || 'Unknown error';
-      el.innerHTML = '';
-      el.appendChild(errBox);
+    if (!r.ok) {
+      target.innerHTML = `<div class="error">${escapeHtml(d.detail || 'LLM request failed.')}</div>`;
+      return;
     }
-  } catch(e) {
-    el.innerHTML = `<div class="error">Request failed: ${e}</div>`;
+    const answer = escapeHtml(d.answer || 'No answer returned.');
+    const sources = (d.sources || []).map(s => {
+      const label = `${escapeHtml(s.ref_no || (s.doc_id || '').slice(0, 12) || '?')} — ${escapeHtml(s.virtual_folder || 'Uncategorized')}`;
+      const link = (s.source_url && /^https?:\/\//i.test(s.source_url))
+        ? ` <a href="${encodeURI(s.source_url)}" target="_blank" rel="noopener noreferrer">↗</a>`
+        : '';
+      return `<li>${label}${link}</li>`;
+    }).join('');
+
+    target.innerHTML = `
+      <div class="answer">${answer}</div>
+      ${sources ? `<div class="meta"><strong>Sources</strong><ul>${sources}</ul></div>` : ''}
+    `;
+  } catch (e) {
+    target.innerHTML = '<div class="error">AI request failed.</div>';
   } finally {
     btn.disabled = false;
   }
 }
 
-document.getElementById('search-input').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
+document.getElementById('search-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doSearch();
+});
+
+document.getElementById('folder-filter').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') loadRecentCases();
+});
+
 loadStats();
+loadRecentCases();
 </script>
 </body>
 </html>
 """
-
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def index():

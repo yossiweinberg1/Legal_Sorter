@@ -71,12 +71,15 @@ class LegalSorterApp:
         
         # Window Configurations
         self.root.title(" LegalSorter Control Center")
-        self.root.geometry("1300x820") 
+        self.root.geometry("1380x860")
+        self.root.minsize(1120, 740)
         
         self.stop_event = threading.Event()
         
         # Configure Polished Visual Styles
         self.configure_styles()
+        self.build_menu()
+        self.setup_shortcuts()
         
         # Discover and link the live DB file location
         self.discover_database_path()
@@ -87,6 +90,98 @@ class LegalSorterApp:
 
         # Intercept window closing to clean up background processes safely
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def build_menu(self):
+        """Builds a simple modern command menu for frequently used actions."""
+        menubar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Sync Database", command=self.sync_database, accelerator="Ctrl+R")
+        file_menu.add_command(label="Open Selected Case", command=self.open_selected_case, accelerator="Ctrl+O")
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_close)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_command(label="Focus Search", command=self.focus_search, accelerator="Ctrl+F")
+        view_menu.add_command(label="Reset Workspace", command=self.reset_workspace)
+        view_menu.add_command(label="Toggle Curation Panel", command=self.toggle_curation_deck, accelerator="Ctrl+Shift+C")
+        menubar.add_cascade(label="View", menu=view_menu)
+
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        tools_menu.add_command(label="Start Crawler", command=self.start_crawler_action)
+        tools_menu.add_command(label="Stop Crawler", command=self.stop_crawler_action)
+        tools_menu.add_command(label="Open Database Viewer", command=self.open_database_viewer)
+        tools_menu.add_command(label="Copy Engine Log", command=self.copy_log_action, accelerator="Ctrl+Shift+L")
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(
+            label="Keyboard Shortcuts",
+            command=lambda: messagebox.showinfo(
+                "Keyboard Shortcuts",
+                "Ctrl+F  → Focus Search\n"
+                "Ctrl+R  → Sync Database\n"
+                "Ctrl+O  → Open Selected Case\n"
+                "Ctrl+Shift+C → Toggle Curation\n"
+                "Ctrl+Shift+L → Copy Log",
+            ),
+        )
+        menubar.add_cascade(label="Help", menu=help_menu)
+
+        self.root.config(menu=menubar)
+
+    def setup_shortcuts(self):
+        """Registers keyboard shortcuts for common actions."""
+        self.root.bind("<Control-f>", lambda _e: self.focus_search())
+        self.root.bind("<Control-r>", lambda _e: self.sync_database())
+        self.root.bind("<Control-o>", lambda _e: self.open_selected_case())
+        self.root.bind("<Control-Shift-C>", lambda _e: self.toggle_curation_deck())
+        self.root.bind("<Control-Shift-L>", lambda _e: self.copy_log_action())
+
+    def focus_search(self):
+        """Moves input focus to the explorer search box."""
+        try:
+            self.main_notebook.select(0)
+            self.search_entry.focus_set()
+            self.search_entry.icursor(tk.END)
+        except Exception:
+            pass
+
+    def reset_workspace(self):
+        """Resets quick filters and refreshes the explorer view."""
+        try:
+            self.quick_search_var.set("")
+        except Exception:
+            pass
+        try:
+            self.search_var.set("")
+        except Exception:
+            pass
+        try:
+            self.refresh_case_tree()
+        except Exception:
+            pass
+
+    def apply_quick_search(self):
+        """Applies quick search text into the explorer filter and refreshes."""
+        try:
+            q = self.quick_search_var.get().strip()
+            self.search_var.set(q)
+            self.focus_search()
+            self.refresh_case_tree()
+        except Exception:
+            pass
+
+    def run_health_check_action(self):
+        """Runs local health check command in a non-blocking subprocess."""
+        try:
+            py = sys.executable
+            proc = subprocess.run([py, "run.py", "health"], capture_output=True, text=True, check=False)
+            output = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "No output."
+            messagebox.showinfo("Health Check", output)
+        except Exception as err:
+            messagebox.showerror("Health Check", f"Failed to run health check: {err}")
 
     def get_error_badge_text(self):
         """Reads the error log and returns the formatted badge text (up to 99, then 99+)."""
@@ -394,6 +489,22 @@ class LegalSorterApp:
         self.stat_timer = ttk.Label(header, text="⏱ 00:00:00", font=lbl_font,
                                     foreground=p["FG_DIM"])
         self.stat_timer.pack(side=tk.LEFT, padx=12)
+
+        # ── Quick command strip ───────────────────────────────────────
+        quick_bar = ttk.Frame(self.root, padding=(10, 0, 10, 4))
+        quick_bar.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(quick_bar, text="Quick Search:").pack(side=tk.LEFT, padx=(0, 6))
+        self.quick_search_var = tk.StringVar()
+        self.quick_search_entry = ttk.Entry(quick_bar, textvariable=self.quick_search_var, width=38)
+        self.quick_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.quick_search_entry.bind("<Return>", lambda _e: self.apply_quick_search())
+
+        ttk.Button(quick_bar, text="Apply", command=self.apply_quick_search, style="Accent.TButton").pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(quick_bar, text="Reset", command=self.reset_workspace).pack(side=tk.LEFT, padx=4)
+        ttk.Button(quick_bar, text="Health", command=self.run_health_check_action).pack(side=tk.LEFT, padx=4)
 
         # ── Action button row ─────────────────────────────────────────
         btn_bar = ttk.Frame(self.root, padding=(10, 0, 10, 4))
