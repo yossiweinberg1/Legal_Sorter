@@ -12,13 +12,14 @@ the document text, so nothing gets invented.
 1. Watches a `pull_folder` for new PDFs/docs/browser saves
 2. Extracts raw text (PyMuPDF / python-docx / BeautifulSoup) — and, for
    HTML saves, tries to recover the original page URL
-3. Tags it: legal citation regex + spaCy NER (parties, courts, dates,
-   jurisdictions) + TF-IDF keywords compared against your existing corpus
+3. Tags it: legal citation regex + parties/dates/jurisdiction regex +
+   TF-IDF keywords compared against your existing corpus
 4. Assigns a SHA256 content ID — also gives automatic de-dup: pull the
    same case twice and it's recognized instantly, second copy discarded
 5. Saves ID + tags + **full extracted text** + a virtual folder label
    (e.g. `Jurisdiction_CA/2023/ContractLaw`) into a SQLite database —
-   this is now the whole "archive"
+   this is now the whole "archive".  An FTS5 virtual table is built on
+   top so full-text search is fast regardless of archive size.
 6. **Deletes the original file** — but only if it knows how to get it back:
    - CourtListener pulls always carry a source URL (guaranteed repullable)
    - HTML saves get one if a canonical URL is found in the page
@@ -29,111 +30,189 @@ the document text, so nothing gets invented.
 This means storage stays tiny — you're keeping searchable text and tags
 for potentially thousands of cases, not the PDFs themselves.
 
+---
+
 ## Setup
 
 ### 1. Install Python packages
 ```
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm
 ```
 
 ### 1b. VS Code quick connect
 1. Open your project root (the folder containing `README.md`) in VS Code
 2. Create and activate a virtual environment in that folder
 3. Select that interpreter in VS Code (`Python: Select Interpreter`)
-4. Install dependencies:
-   - `pip install -r requirements.txt`
-5. Run from VS Code terminal:
-   - UI: `python app.pyw`
-   - Crawler: `python run.py crawl`
+4. Install dependencies: `pip install -r requirements.txt`
+5. Run from VS Code terminal: `python app.pyw` (desktop UI) or
+   `uvicorn web_app:app --reload` (web interface)
 
 ### 2. Edit `config.yaml`
 - `pull_folder`, `index_folder`, `pending_folder` — paths on your internal
   drive. All three stay small; `index_folder` holds just the database.
 - `keep_if_no_repull_source` — leave `true` (default) unless you're fine
-  losing files with no known online source. If you flip it to `false`,
-  the original gets deleted no matter what, per your instruction — just
-  know that's not reversible for hand-added files with no source URL.
+  losing files with no known online source.
 
 ### 3. CourtListener (free legal case API)
 Sign up at https://www.courtlistener.com/sign-in/, grab your API token,
-paste it into `config.yaml` under `courtlistener.api_token`.
+then set it as an environment variable (do **not** paste it into config.yaml):
 
-This is the only automated case-pulling source built in, on purpose —
-it's free, official, and ToS-compliant (run by the nonprofit Free Law
-Project). I didn't build scrapers for Westlaw/Lexis/Google Scholar since
-those prohibit automated scraping. If you have your own PACER or Westlaw
-account, tell me and I can wire a fetcher against your credentials.
+```
+# Windows
+setx COURTLISTENER_API_TOKEN "your-token-here"
 
-### 3b. Token security (required)
-- Do not keep real CourtListener tokens in `config.yaml`.
-- Set token(s) as environment variables instead:
-  - `COURTLISTENER_API_TOKEN` for one token
-  - `COURTLISTENER_API_TOKENS` for multiple comma-separated tokens
-- Optional: override API base URL with `COURTLISTENER_BASE_URL`.
+# Linux / Mac
+export COURTLISTENER_API_TOKEN="your-token-here"
+```
 
-### 4. Phone → laptop transfer (Syncthing)
-1. Install Syncthing on your laptop: https://syncthing.net/downloads/
-   (ARM64 Windows build available)
-2. Install "Syncthing" or "Möbius Sync" on your phone (Play Store)
-3. Pair the devices (QR code scan in the app)
-4. Share a folder from your phone and sync it into your `pull_folder`
-   path from `config.yaml`
-5. Anything saved to that folder on your phone shows up on the laptop and
-   gets processed automatically — device-to-device, no cloud in the middle
+Multiple tokens (for higher rate limits):
+```
+setx COURTLISTENER_API_TOKENS "token1,token2,token3"
+```
+
+### 4. LLM / AI assistant
+
+#### Option A — Ollama (local, free, recommended)
+1. Install Ollama: https://ollama.com (one-click Windows/Mac/Linux installer)
+2. Pull a model: `ollama pull llama3` (or `mistral`, `phi3`, `gemma2`)
+3. Edit `config.yaml`:
+   ```yaml
+   llm:
+     base_url: "http://localhost:11434/v1"
+     api_key: ""
+     model: "llama3"
+   ```
+4. Hardware requirements:
+   - 7B models (quantized): 8 GB RAM, any modern CPU
+   - 13B models: 16 GB RAM
+   - 70B models: 48 GB RAM or an NVIDIA GPU with 24 GB VRAM
+
+#### Option B — LM Studio (GUI app)
+1. Download from https://lmstudio.ai
+2. Download a GGUF model (e.g. Mistral 7B)
+3. Start the local server (it shows you the port, usually 1234)
+4. Edit `config.yaml`:
+   ```yaml
+   llm:
+     base_url: "http://localhost:1234/v1"
+     api_key: "lm-studio"
+     model: "local-model"
+   ```
+
+#### Option C — OpenAI / cloud
+Set the `LLM_API_KEY` environment variable. Never put real keys in config.yaml:
+```
+setx LLM_API_KEY "sk-..."
+```
+
+---
 
 ## Running it
 
-Start the watcher:
+### Desktop UI
+```
+python app.pyw
+```
+
+### Web interface (read-only, searchable website)
+```
+uvicorn web_app:app --host 0.0.0.0 --port 8000
+```
+Then open http://localhost:8000 in your browser.
+
+API docs are auto-generated at http://localhost:8000/docs
+
+The web interface is **read-only** — it only exposes search, AI Q&A, and
+case detail endpoints. Nothing can write to the database through it.
+
+### Watcher / crawler
 ```
 python run.py
 ```
 
-Pull cases from CourtListener straight into `pull_folder`:
+Pull cases from CourtListener:
 ```
-python run.py pull "qualified immunity ninth circuit"
-```
-
-Full-text search everything you've indexed so far (works even though the
-original files are gone — it's searching the extracted text):
-```
-python run.py search "breach of contract damages"
+python run.py crawl
 ```
 
-## Repulling a case later
-- If `source_url` is a CourtListener link, just open it, or extend
-  `legal_fetch.py` to re-download by URL (small addition — ask if you
-  want it wired into `run.py` as a `repull <id>` command).
-- If it's a general web URL, open it directly or re-save it into
-  `pull_folder`.
-- If a document is sitting in `pending_folder`, it was never deleted —
-  it's just waiting because no repull source could be found.
+Bulk ingest from CourtListener S3 dump:
+```
+python bulk_ingest.py
+```
 
-## Notes on the tagging ("learning without hallucinating")
-No LLM in the tagging path — regex + spaCy NER + TF-IDF, all of which
-only surface text literally present in the document or statistically
-derived from your own corpus. As your archive grows past ~15 documents,
-TF-IDF keyword tags get more specific because they're computed *relative
-to your other cases* — that's the "learns from its own data" behavior
-without any generative risk.
+Train the local tiny LLM on your indexed cases:
+```
+python run_training.py
+```
 
-## Student-facing assistant mode (RAG-first)
-- The app now prioritizes retrieval-grounded study output from your local
-  `documents` table.
-- Output format is source-backed by design: answer/brief/IRAC/flashcards +
-  quoted evidence + case IDs/ref numbers/source URLs.
-- This is intended as a study aid workflow for law students and keeps source
-  traceability visible.
+Verify data integrity (random spot-check against live CourtListener):
+```
+python auditor.py
+```
 
-## Hardware expectations for training/generation
-- Current tiny local model path:
-  - Minimum: 4–8 core CPU, 16 GB RAM, SSD
-  - Better: NVIDIA GPU 8–16 GB VRAM, 32 GB RAM
-- For a production-grade legal assistant:
-  - Prefer strong hosted model + retrieval, or QLoRA/LoRA tuning
-  - Practical fine-tune floor: 24 GB VRAM, 32–64 GB RAM, fast NVMe
-  - Higher quality at scale: cloud A100/H100 class GPUs
+---
 
-Want document clustering next (auto-grouping similar cases beyond the
-current tag-based folders)? That's a natural addition once you have more
-volume — still fully local, no API calls, no risk of hallucinated labels.
+## Pipeline overview
+
+```
+CourtListener API  ──┐
+CourtListener S3  ───┼──► pull_folder ──► watcher.scan_once()
+Hand-dropped files ──┘         │
+                               │  extract text (PyMuPDF / docx / BS4)
+                               │  analyze (citation regex, ruling keywords)
+                               │  tag (entities, TF-IDF keywords)
+                               │  dedup (SHA256 content ID)
+                               │  assign ref_no (LC-000001, LC-000002, …)
+                               ▼
+                         SQLite database
+                         ├── documents table (full text + tags + FTS5 index)
+                         ├── citation_index
+                         ├── cross_references
+                         └── priority_queue
+                               │
+                     ┌─────────┴──────────┐
+                     │                    │
+               Desktop UI           Web interface
+               (app.pyw)        (uvicorn web_app:app)
+                     │                    │
+                  LLM Q&A ◄──────────────┘
+             (Ollama / LM Studio / OpenAI)
+```
+
+---
+
+## Notes
+
+### Search performance
+The database now has an FTS5 virtual table (`documents_fts`) built on top
+of every document's text, keywords, and virtual folder.  Search queries go
+through FTS5 first (extremely fast, supports phrase search and boolean
+operators) and fall back to a LIKE scan only on older SQLite builds that
+lack FTS5.
+
+### Custom tiny LLM (`src/llm/`)
+The tiny transformer model trained by `run_training.py` is a ~10M parameter
+demo model.  It can learn patterns from your case corpus but will not produce
+polished legal answers.  Use it to understand the training pipeline — for
+real Q&A, Ollama + a 7B model gives far better results.
+
+Training now actually injects citation graph vectors into the residual stream
+(was previously a no-op), uses temperature+top-k sampling during generation
+(no more repetitive greedy output), and supports datasets up to 200 000 tokens.
+
+### Hardware for training
+- CPU-only (8-core, 16 GB RAM): slow but works for small corpora
+- NVIDIA GPU (8 GB VRAM): recommended for any serious training run
+- For fine-tuning a 7B model with LoRA/QLoRA: 24 GB VRAM minimum
+
+### Token security
+- Never put real API keys in `config.yaml` — use environment variables
+- `token_manager.py` safely updates `config.yaml` only — it no longer
+  rewrites source code files
+- The `.gitignore` now excludes all generated artifacts, model weights,
+  and runtime state files
+
+### Data integrity
+Run `python auditor.py` any time to spot-check a random locally stored
+case against the live CourtListener API.
+
