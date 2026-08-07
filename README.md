@@ -61,6 +61,14 @@ This creates `.venv`, installs dependencies, and runs a local health check.
 - `keep_if_no_repull_source` — leave `true` (default) unless you're fine
   losing files with no known online source.
 - On Linux/macOS, replace the default Windows-style paths with local absolute paths.
+- Optional production-readiness block (recommended before selling):
+  ```yaml
+  production:
+    enabled: false
+    support_email: "support@yourdomain.com"
+    backup_folder: "/absolute/path/to/backups"
+    audit_log_path: "logs/audit.log"
+  ```
 
 ### 3. CourtListener (free legal case API)
 Sign up at https://www.courtlistener.com/sign-in/, grab your API token,
@@ -154,6 +162,11 @@ python run.py crawl
 Health check (dependencies + config + DB readiness):
 ```
 python run.py health
+```
+
+Strict production-readiness check (sellability baseline):
+```
+python run.py readiness
 ```
 
 Bulk ingest from CourtListener S3 dump:

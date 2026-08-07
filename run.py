@@ -45,6 +45,9 @@ def main():
         if args and args[0] == "health":
             print("[Command] Running local health check...")
             sys.exit(run_health_check())
+        elif args and args[0] == "readiness":
+            print("[Command] Running strict production-readiness check...")
+            sys.exit(run_health_check(strict=True))
         elif args and args[0] == "crawl":
             print("[Command] Received 'crawl' signal. Initiating watcher loop...")
             run_forever()

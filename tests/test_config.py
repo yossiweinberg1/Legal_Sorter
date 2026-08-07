@@ -57,6 +57,36 @@ courtlistener:
         cfg = cfgmod.load_config(str(cfg_path))
         self.assertEqual(cfg["courtlistener"]["api_tokens"], ["token_a", "token_b"])
 
+    def test_load_config_rejects_missing_required_paths(self):
+        cfg_path = self._write_cfg(
+            """
+index_folder: "/tmp/index"
+pending_folder: "/tmp/pending"
+courtlistener:
+  base_url: "https://example.com"
+  api_tokens: []
+"""
+        )
+        with self.assertRaises(ValueError):
+            cfgmod.load_config(str(cfg_path))
+
+    def test_load_config_injects_llm_defaults(self):
+        base = Path(self.tmp.name)
+        cfg_path = self._write_cfg(
+            f"""
+pull_folder: "{base / 'pull3'}"
+index_folder: "{base / 'index3'}"
+pending_folder: "{base / 'pending3'}"
+courtlistener:
+  base_url: "https://example.com"
+  api_tokens: []
+"""
+        )
+        cfg = cfgmod.load_config(str(cfg_path))
+        self.assertEqual(cfg["llm"]["model"], "gpt-4o-mini")
+        self.assertEqual(cfg["llm"]["max_context_chars"], 12000)
+        self.assertIn("production.support_email is not set.", cfg.get("_warnings", []))
+
 
 if __name__ == "__main__":
     unittest.main()
