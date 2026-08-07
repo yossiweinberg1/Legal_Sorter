@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 from src import config as cfgmod
 from src import audit as auditlog
+from src.icon_utils import logo_data_uri
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -402,13 +403,15 @@ def admin_backups(limit: int = Query(default=20, le=100), principal: dict = Depe
 # Browser UI (single-page HTML)
 # ---------------------------------------------------------------------------
 
-_HTML = r"""<!DOCTYPE html>
+_LOGO_DATA_URI = logo_data_uri(256)
+
+_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Legal Sorter — Archive Console</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='12' fill='%231E2D40'/%3E%3Cg fill='none' stroke='%233E9BC0' stroke-width='4' stroke-linecap='round'%3E%3Cline x1='50' y1='18' x2='50' y2='30'/%3E%3Cline x1='22' y1='30' x2='78' y2='30'/%3E%3Cline x1='50' y1='70' x2='50' y2='82'/%3E%3Cline x1='36' y1='82' x2='64' y2='82'/%3E%3C/g%3E%3Cellipse cx='25' cy='48' rx='14' ry='6' fill='none' stroke='%233E9BC0' stroke-width='3'/%3E%3Cline x1='22' y1='30' x2='25' y2='42' stroke='%233E9BC0' stroke-width='3'/%3E%3Cellipse cx='75' cy='48' rx='14' ry='6' fill='none' stroke='%233E9BC0' stroke-width='3'/%3E%3Cline x1='78' y1='30' x2='75' y2='42' stroke='%233E9BC0' stroke-width='3'/%3E%3Crect x='38' y='56' width='24' height='14' rx='3' fill='%238FA3B1' opacity='.7'/%3E%3C/svg%3E" />
+<link rel="icon" type="image/png" href="__LOGO_DATA_URI__" />
 <style>
   /* ── GitHub-inspired design tokens ─────────────────────────────── */
   :root {
@@ -459,15 +462,23 @@ _HTML = r"""<!DOCTYPE html>
     gap: 16px;
   }
   .gh-header .logo {
-    font-size: 20px;
-    font-weight: 700;
-    color: var(--color-fg-default);
     text-decoration: none;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
   }
-  .gh-header .logo span { color: var(--color-fg-muted); font-weight: 400; }
+  .gh-header .logo img {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }
+  .gh-header .logo span {
+    color: var(--color-fg-default);
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: .04em;
+  }
   .gh-header nav { display: flex; gap: 4px; margin-left: auto; }
   .gh-header nav a {
     color: var(--color-fg-muted);
@@ -708,7 +719,7 @@ _HTML = r"""<!DOCTYPE html>
 
 <!-- ── Top nav ─────────────────────────────────────────── -->
 <header class="gh-header">
-  <a class="logo" href="/"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 100 100" aria-hidden="true" style="flex-shrink:0"><rect width="100" height="100" rx="12" fill="#1E2D40"/><g fill="none" stroke="#3E9BC0" stroke-width="5" stroke-linecap="round"><line x1="50" y1="17" x2="50" y2="30"/><line x1="22" y1="30" x2="78" y2="30"/><line x1="50" y1="70" x2="50" y2="82"/><line x1="36" y1="82" x2="64" y2="82"/></g><ellipse cx="25" cy="48" rx="14" ry="6" fill="none" stroke="#3E9BC0" stroke-width="4"/><line x1="22" y1="30" x2="25" y2="42" stroke="#3E9BC0" stroke-width="4"/><ellipse cx="75" cy="48" rx="14" ry="6" fill="none" stroke="#3E9BC0" stroke-width="4"/><line x1="78" y1="30" x2="75" y2="42" stroke="#3E9BC0" stroke-width="4"/><rect x="38" y="56" width="24" height="14" rx="3" fill="#8FA3B1" opacity=".7"/></svg> <span>Legal Sorter</span></a>
+  <a class="logo" href="/"><img src="__LOGO_DATA_URI__" alt="Legal Sorter logo" /> <span>Legal Sorter</span></a>
   <nav>
     <a href="/docs" target="_blank" rel="noopener noreferrer">API Docs</a>
   </nav>
@@ -994,6 +1005,8 @@ loadStats();
 </body>
 </html>
 """
+
+_HTML = _HTML_TEMPLATE.replace("__LOGO_DATA_URI__", _LOGO_DATA_URI)
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def index():
