@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS documents (
     cluster_id INTEGER,
     added_at TEXT DEFAULT CURRENT_TIMESTAMP,
     deleted_original INTEGER DEFAULT 0,
-    held_no_repull_source INTEGER DEFAULT 0
+    held_no_repull_source INTEGER DEFAULT 0,
+    content_source TEXT DEFAULT 'full_text',
+    sanity_check_passed INTEGER DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS priority_queue (
@@ -106,6 +108,18 @@ class DB:
         except sqlite3.OperationalError:
             pass  # columns already exist
 
+        # --- CONTENT QUALITY COLUMNS (added with content-sanity-check feature) ---
+        for col_def in [
+            "content_source TEXT DEFAULT 'full_text'",
+            "sanity_check_passed INTEGER DEFAULT 1",
+        ]:
+            col_name = col_def.split()[0]
+            try:
+                self.conn.execute(f"ALTER TABLE documents ADD COLUMN {col_def}")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
         # Ensure ref_no has an index for fast UI lookups
         try:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_ref_no ON documents (ref_no)")
@@ -153,16 +167,19 @@ class DB:
         rows = cursor.fetchall()
         return [row[0] for row in rows]
 
-    def insert_document(self, doc_id, source_path, file_type, entities, citations, keywords, text, source_url=None, virtual_folder=None):
+    def insert_document(self, doc_id, source_path, file_type, entities, citations, keywords, text,
+                        source_url=None, virtual_folder=None,
+                        content_source="full_text", sanity_check_passed=1):
         """Glues together and saves the fully parsed document metadata into the database."""
         self.conn.execute(
             """INSERT OR REPLACE INTO documents 
-            (id, source_path, file_type, entities_json, citations_json, keywords_json, text, source_url, virtual_folder) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, source_path, file_type, entities_json, citations_json, keywords_json, text,
+             source_url, virtual_folder, content_source, sanity_check_passed) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                doc_id, source_path, file_type, 
-                json.dumps(entities), json.dumps(citations), json.dumps(keywords), 
-                text, source_url, virtual_folder
+                doc_id, source_path, file_type,
+                json.dumps(entities), json.dumps(citations), json.dumps(keywords),
+                text, source_url, virtual_folder, content_source, sanity_check_passed,
             )
         )
         self.conn.commit()

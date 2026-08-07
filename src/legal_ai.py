@@ -116,6 +116,8 @@ def _load_all(db_path: str) -> list[_CaseRow]:
                           keywords_json, citations_json
                    FROM documents
                    WHERE text IS NOT NULL AND text != ''
+                     AND (content_source IS NULL OR content_source != 'snippet_only')
+                     AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)
                    ORDER BY added_at DESC
                    LIMIT ?""",
                 (_MAX_LOAD,),
@@ -141,7 +143,9 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
             cur = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, text,
                           keywords_json, citations_json
-                   FROM documents WHERE id = ?""",
+                   FROM documents WHERE id = ?
+                     AND (content_source IS NULL OR content_source != 'snippet_only')
+                     AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)""",
                 (doc_id,),
             )
             r = cur.fetchone()
@@ -222,6 +226,17 @@ def query_cases(
 ) -> tuple[str, list[dict]]:
     """Ask a legal question; answer is grounded in the top-k indexed cases.
 
+    Uses a two-pass RAG approach so the LLM always reasons over legally
+    meaningful content instead of a fixed character slice:
+
+      Pass 1 — For each of the top-k cases, send the full case text to the
+               LLM with a single instruction: extract the holding, key facts,
+               and any relevant citations in 3-5 sentences.  This produces a
+               dense, high-signal summary of each case.
+
+      Pass 2 — Send all summaries together to the LLM to answer the user's
+               question with full source citations.
+
     Returns:
         (answer_str, sources_list)
         sources_list entries: {doc_id, ref_no, virtual_folder, source_url}
@@ -235,36 +250,53 @@ def query_cases(
     if not top:
         return ("No relevant cases found for that query. Try different search terms.", [])
 
-    max_chars = cfg["max_context_chars"]
-    context_blocks: list[str] = []
-    for i, r in enumerate(top, 1):
-        snippet = r.text[:max_chars // len(top)]
+    # --- Pass 1: summarise each case from its full text ---
+    summarize_system = (
+        "You are a precise legal analyst. "
+        "Given the full text of a court opinion, extract ONLY: "
+        "(1) the core holding in one sentence, "
+        "(2) the key facts in 1-2 sentences, "
+        "(3) any citations to other cases mentioned. "
+        "Be concise and use only what the text actually says."
+    )
+
+    summaries: list[str] = []
+    for r in top:
         label = r.ref_no or r.doc_id[:12]
-        block = (
-            f"[SOURCE {i}: {label}]\n"
-            f"Folder: {r.virtual_folder or 'Uncategorized'}\n"
-            f"---\n{snippet}\n"
+        user_msg = (
+            f"CASE: {label}\n"
+            f"FOLDER: {r.virtual_folder or 'Uncategorized'}\n\n"
+            f"--- FULL CASE TEXT ---\n{r.text}\n--- END ---\n\n"
+            "Extract the holding, key facts, and citations as instructed."
         )
-        context_blocks.append(block)
+        try:
+            summary = _chat([
+                {"role": "system", "content": summarize_system},
+                {"role": "user",   "content": user_msg},
+            ], cfg)
+        except Exception as exc:
+            log.warning("Pass-1 summary failed for %s: %s", label, exc)
+            summary = f"(Summary unavailable for {label})"
+        summaries.append(f"[SOURCE {top.index(r) + 1}: {label}]\n{summary}")
 
-    context = "\n\n".join(context_blocks)
-
-    system_msg = (
+    # --- Pass 2: answer the question from the summaries ---
+    context = "\n\n".join(summaries)
+    answer_system = (
         "You are a precise legal research assistant. "
-        "Answer the user's question using ONLY the provided case excerpts. "
+        "Answer the user's question using ONLY the provided case summaries. "
         "Cite each source by its [SOURCE N] label whenever you draw on it. "
-        "If the excerpts do not contain enough information, say so explicitly. "
+        "If the summaries do not contain enough information, say so explicitly. "
         "Do not invent facts, holdings, or citations."
     )
-    user_msg = (
-        f"CASE EXCERPTS:\n\n{context}\n\n"
+    answer_user = (
+        f"CASE SUMMARIES:\n\n{context}\n\n"
         f"QUESTION: {question}\n\n"
         "Provide a clear, structured answer with source citations."
     )
 
     answer = _chat([
-        {"role": "system", "content": system_msg},
-        {"role": "user",   "content": user_msg},
+        {"role": "system", "content": answer_system},
+        {"role": "user",   "content": answer_user},
     ], cfg)
 
     sources = [
@@ -286,6 +318,9 @@ def analyze_case(
 ) -> str:
     """Run any LLM instruction against a single indexed case.
 
+    Sends the full stored case text — not a truncated excerpt — so the LLM
+    has complete context to reason from.
+
     Examples of instruction:
         "Summarize the key holdings and reasoning."
         "Identify the strongest arguments for the appellant."
@@ -298,19 +333,17 @@ def analyze_case(
         return f"Case {doc_id[:12]} not found in the database."
 
     label = row.ref_no or row.doc_id[:12]
-    max_chars = cfg["max_context_chars"]
-    text_excerpt = row.text[:max_chars]
 
     system_msg = (
         "You are an expert legal analyst. "
-        "You will be given the text of a court opinion and a specific instruction. "
+        "You will be given the full text of a court opinion and a specific instruction. "
         "Respond accurately, referencing specific language from the text. "
         "Do not speculate beyond what the text supports."
     )
     user_msg = (
         f"CASE: {label}\n"
         f"FOLDER: {row.virtual_folder or 'Uncategorized'}\n\n"
-        f"--- CASE TEXT (excerpt) ---\n{text_excerpt}\n--- END ---\n\n"
+        f"--- FULL CASE TEXT ---\n{row.text}\n--- END ---\n\n"
         f"INSTRUCTION: {instruction}"
     )
 

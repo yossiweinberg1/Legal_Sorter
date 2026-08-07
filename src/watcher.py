@@ -47,6 +47,93 @@ from .database import DB
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Content sanity check
+# ---------------------------------------------------------------------------
+
+def _sample_chunks(text: str, chunk_size: int = 500) -> str:
+    """Return three samples from beginning, middle, and end of text,
+    labelled so the LLM can orient itself within the document."""
+    n = len(text)
+    if n <= chunk_size * 3:
+        return text  # short enough to send whole
+
+    start  = text[:chunk_size]
+    mid_s  = max(0, n // 2 - chunk_size // 2)
+    middle = text[mid_s: mid_s + chunk_size]
+    end    = text[max(0, n - chunk_size):]
+
+    return (
+        f"[BEGINNING OF DOCUMENT]\n{start}\n\n"
+        f"[MIDDLE OF DOCUMENT]\n{middle}\n\n"
+        f"[END OF DOCUMENT]\n{end}"
+    )
+
+
+def sanity_check_document(text: str, cfg: dict) -> tuple[bool, str]:
+    """Send three sampled chunks (beginning / middle / end) to a small LLM
+    and ask whether the content is a real legal document.
+
+    Returns (passed: bool, reason: str).
+    If the LLM call fails for any reason the check is treated as passed so
+    that a misconfigured API key or network outage does not block ingestion.
+    """
+    llm_cfg = cfg.get("llm", {})
+    import os
+    api_cfg = {
+        "base_url": llm_cfg.get("base_url", "https://api.openai.com/v1").rstrip("/"),
+        "api_key": os.environ.get("LLM_API_KEY", ""),
+        "model": llm_cfg.get("model", "gpt-4o-mini"),
+    }
+
+    if not api_cfg["api_key"]:
+        # No LLM configured — skip check rather than block all ingestion
+        log.debug("[SANITY] No LLM API key set; skipping content sanity check.")
+        return True, "skipped (no API key)"
+
+    sample = _sample_chunks(text)
+
+    system_msg = (
+        "You are a document classifier. "
+        "You will receive three labelled excerpts (beginning, middle, end) from a file. "
+        "Decide whether the content is a real legal document — a court opinion, "
+        "brief, statute, regulation, or similar legal text. "
+        "Reply with EXACTLY one line: YES or NO, followed by a colon and a short reason "
+        "(e.g. 'YES: contains case caption, citations, and legal reasoning' or "
+        "'NO: content is garbled OCR noise with no legal structure'). "
+        "Do not add any other text."
+    )
+    user_msg = f"DOCUMENT EXCERPTS:\n\n{sample}"
+
+    import json as _json, urllib.request as _req
+    payload = _json.dumps({
+        "model": api_cfg["model"],
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 60,
+    }).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + api_cfg["api_key"],
+    }
+    url = f"{api_cfg['base_url']}/chat/completions"
+
+    try:
+        request = _req.Request(url, data=payload, headers=headers, method="POST")
+        with _req.urlopen(request, timeout=30) as resp:
+            data = _json.loads(resp.read())
+            reply = data["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        log.warning("[SANITY] LLM call failed (%s) — treating check as passed.", exc)
+        return True, f"skipped (LLM error: {exc})"
+
+    passed = reply.upper().startswith("YES")
+    reason = reply.split(":", 1)[1].strip() if ":" in reply else reply
+    return passed, reason
+
 # Global state for API Keys
 # Schema: { "token_string": { "enabled": True, "cooldown_until": 0, "consecutive_429s": 0 } }
 TOKEN_REGISTRY = {}
@@ -125,16 +212,20 @@ def is_valid_pdf(file_path: Path) -> bool:
         return False
 
 
-def _load_sidecar_url(file_path: str) -> str | None:
-    """Reads the sidecar to get the source_url, but leaves it intact in case of a crash."""
+def _load_sidecar(file_path: str) -> dict:
+    """Reads the full sidecar metadata, leaving the file intact in case of a crash."""
     sidecar = Path(str(file_path) + ".meta.json")
     if sidecar.exists():
         try:
-            data = json.loads(sidecar.read_text(encoding="utf-8"))
-            return data.get("source_url")
+            return json.loads(sidecar.read_text(encoding="utf-8"))
         except Exception:
-            return None
-    return None
+            return {}
+    return {}
+
+
+def _load_sidecar_url(file_path: str) -> str | None:
+    """Reads the sidecar to get the source_url, but leaves it intact in case of a crash."""
+    return _load_sidecar(file_path).get("source_url")
 
 def process_file(file_path: str, cfg: dict, db: DB):
     p = Path(file_path)
@@ -153,7 +244,9 @@ def process_file(file_path: str, cfg: dict, db: DB):
         Path(str(file_path) + ".meta.json").unlink(missing_ok=True)
         return
 
-    source_url = _load_sidecar_url(file_path)
+    sidecar_data = _load_sidecar(file_path)
+    source_url = sidecar_data.get("source_url")
+    content_source = sidecar_data.get("content_source", "full_text")
 
     # --- ERR MARKER 1: FILE TOO BIG ---
     MAX_FILE_SIZE_MB = 30
@@ -218,6 +311,26 @@ def process_file(file_path: str, cfg: dict, db: DB):
 
     # [The rest of your successful text processing logic continues below here...]
 
+    # --- ERR MARKER 4: CONTENT SANITY CHECK ---
+    # Sample beginning, middle, and end of the extracted text and ask a small
+    # LLM call to confirm this is actually a legal document.  This catches
+    # garbled OCR, binary-garbage text, and any snippet that slipped through.
+    log.info(f"[SANITY] Verifying content quality for: {p.name}")
+    sanity_passed, sanity_reason = sanity_check_document(text_content, cfg)
+    if not sanity_passed:
+        log_ui_error(
+            str(p), "Sanity Check Failed",
+            f"LLM rejected content as non-legal: {sanity_reason}", source_url
+        )
+        log.warning(
+            f"[SANITY FAIL] {p.name} rejected — {sanity_reason}. "
+            "File purged; document will not be indexed."
+        )
+        p.unlink(missing_ok=True)
+        Path(str(file_path) + ".meta.json").unlink(missing_ok=True)
+        return
+    log.info(f"  [SANITY OK] {p.name} — {sanity_reason}")
+
     log.info(f"[*] Analyzing ruling logic and scanning citations for: {p.name}")
     analysis = analyzer.analyze_document_text(text_content)
 
@@ -247,6 +360,7 @@ def process_file(file_path: str, cfg: dict, db: DB):
         doc_id, str(p), extracted_file_type,
         tags.entities, tags.citations, tags.keywords, text_content,
         source_url=source_url, virtual_folder=virtual_folder,
+        content_source=content_source, sanity_check_passed=1,
     )
 
     ref_no = db.assign_ref_no(doc_id)

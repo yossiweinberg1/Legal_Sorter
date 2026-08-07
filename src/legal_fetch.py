@@ -70,13 +70,15 @@ class CourtListenerClient:
                 detail_resp = self.session.get(f"{self.base_url}/opinions/{opinion_id}/")
                 if detail_resp.ok:
                     detail_data = detail_resp.json()
+                    # Only accept full-text fields — never fall back to the search
+                    # snippet here.  The snippet is a 3-5 sentence search teaser
+                    # and will corrupt the LLM context if stored as a full case.
                     text = (
                         detail_data.get("plain_text")
                         or detail_data.get("html_with_citations")
                         or detail_data.get("html")
                         or detail_data.get("html_lawbox")
                         or detail_data.get("html_columbia")
-                        or result.get("snippet")
                     )
                     if text:
                         dest = Path(dest_folder) / f"cl_{opinion_id}.txt"
@@ -86,19 +88,29 @@ class CourtListenerClient:
             except Exception as e:
                 log.error(f"[DEBUG] Failed to fetch opinion detail for {opinion_id}: {e}")
 
-        # 3. Absolute last resort: use the search snippet itself
+        # 3. If we still have nothing, log and skip — do NOT save a search snippet.
+        # Snippets are 3-5 sentence search teasers with no legal reasoning.
         if dest is None:
-            text = result.get("snippet")
-            if text:
-                dest = Path(dest_folder) / f"cl_{opinion_id or 'unknown'}.txt"
-                dest.write_text(text, encoding="utf-8")
+            log.warning(
+                f"[SKIP] No full text available for opinion {opinion_id} "
+                f"({result.get('caseName', 'unknown case')}). "
+                "Skipping to avoid storing a content-free snippet."
+            )
 
         if dest:
+            # Record whether the text came from a PDF, the API detail endpoint,
+            # or some other full-text source.  "snippet_only" is never written
+            # here any more, but the field is kept for schema consistency.
+            if dest.suffix == ".pdf":
+                content_source = "pdf"
+            else:
+                content_source = "full_text"
             sidecar = Path(str(dest) + ".meta.json")
             sidecar.write_text(json.dumps({
                 "source_url": source_url,
                 "case_name": result.get("caseName"),
                 "court": result.get("court"),
+                "content_source": content_source,
             }), encoding="utf-8")
             return str(dest)
 
