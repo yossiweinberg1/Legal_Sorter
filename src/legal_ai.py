@@ -73,11 +73,9 @@ def _chat(messages: list[dict], cfg: dict) -> str:
         "messages": messages,
         "temperature": 0.2,
     }).encode()
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {cfg['api_key']}",
-    }
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("api_key"):
+        headers["Authorization"] = "Bearer " + cfg["api_key"]
 
     url = f"{cfg['base_url']}/chat/completions"
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")

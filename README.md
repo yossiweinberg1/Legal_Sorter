@@ -39,6 +39,12 @@ for potentially thousands of cases, not the PDFs themselves.
 pip install -r requirements.txt
 ```
 
+### 1a. One-command local bootstrap (recommended)
+```
+python bootstrap_local.py
+```
+This creates `.venv`, installs dependencies, and runs a local health check.
+
 ### 1b. VS Code quick connect
 1. Open your project root (the folder containing `README.md`) in VS Code
 2. Create and activate a virtual environment in that folder
@@ -52,6 +58,7 @@ pip install -r requirements.txt
   drive. All three stay small; `index_folder` holds just the database.
 - `keep_if_no_repull_source` — leave `true` (default) unless you're fine
   losing files with no known online source.
+- On Linux/macOS, replace the default Windows-style paths with local absolute paths.
 
 ### 3. CourtListener (free legal case API)
 Sign up at https://www.courtlistener.com/sign-in/, grab your API token,
@@ -69,6 +76,8 @@ Multiple tokens (for higher rate limits):
 ```
 setx COURTLISTENER_API_TOKENS "token1,token2,token3"
 ```
+
+You can start from `.env.example` and load environment values from there in your shell.
 
 ### 4. LLM / AI assistant
 
@@ -135,6 +144,11 @@ Pull cases from CourtListener:
 python run.py crawl
 ```
 
+Health check (dependencies + config + DB readiness):
+```
+python run.py health
+```
+
 Bulk ingest from CourtListener S3 dump:
 ```
 python bulk_ingest.py
@@ -148,6 +162,11 @@ python run_training.py
 Verify data integrity (random spot-check against live CourtListener):
 ```
 python auditor.py
+```
+
+Run local tests:
+```
+python -m unittest discover -s tests -v
 ```
 
 ---
@@ -183,6 +202,11 @@ Hand-dropped files ──┘         │
 
 ## Notes
 
+### CI
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
+- `python -m compileall -q .`
+- `python -m unittest discover -s tests -v`
+
 ### Search performance
 The database now has an FTS5 virtual table (`documents_fts`) built on top
 of every document's text, keywords, and virtual folder.  Search queries go
@@ -215,4 +239,3 @@ Training now actually injects citation graph vectors into the residual stream
 ### Data integrity
 Run `python auditor.py` any time to spot-check a random locally stored
 case against the live CourtListener API.
-
