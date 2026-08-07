@@ -56,7 +56,12 @@ def _load_llm_cfg() -> dict:
         "base_url": llm.get("base_url", "https://api.openai.com/v1").rstrip("/"),
         "api_key": os.environ.get("LLM_API_KEY", ""),
         "model": llm.get("model", "gpt-4o-mini"),
+        "fast_model": llm.get("fast_model", llm.get("model", "gpt-4o-mini")),
+        "accurate_model": llm.get("accurate_model", llm.get("model", "gpt-4o-mini")),
         "max_context_chars": int(llm.get("max_context_chars", 12000)),
+        "require_citations": bool(llm.get("require_citations", True)),
+        "min_sources": int(llm.get("min_sources", 1)),
+        "timeout_seconds": int(llm.get("timeout_seconds", 60)),
     }
 
 
@@ -64,14 +69,14 @@ def _load_llm_cfg() -> dict:
 # Low-level HTTP call (avoids adding openai SDK as a hard dep)
 # ---------------------------------------------------------------------------
 
-def _chat(messages: list[dict], cfg: dict) -> str:
+def _chat(messages: list[dict], cfg: dict, *, model: str | None = None, temperature: float = 0.2) -> str:
     """POST to any OpenAI-compatible /chat/completions endpoint."""
     import urllib.request
 
     payload = json.dumps({
-        "model": cfg["model"],
+        "model": model or cfg["model"],
         "messages": messages,
-        "temperature": 0.2,
+        "temperature": temperature,
     }).encode()
     headers = {"Content-Type": "application/json"}
     if cfg.get("api_key"):
@@ -81,7 +86,7 @@ def _chat(messages: list[dict], cfg: dict) -> str:
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=int(cfg.get("timeout_seconds", 60))) as resp:
             data = json.loads(resp.read())
             return data["choices"][0]["message"]["content"].strip()
     except Exception as exc:
@@ -215,6 +220,15 @@ def _snippet(text: str, query_terms: set[str], max_chars: int = 400) -> str:
     return (best or text[:max_chars].replace("\n", " "))[:max_chars]
 
 
+def _extractive_fallback(question: str, rows: list[_CaseRow]) -> str:
+    parts = [f"Unable to complete an LLM answer for: {question}"]
+    parts.append("Relevant source-backed excerpts:")
+    for idx, row in enumerate(rows, 1):
+        label = row.ref_no or row.doc_id[:12]
+        parts.append(f"[SOURCE {idx}: {label}] {_snippet(row.text, set(_tokenize(question)), max_chars=220)}")
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -249,6 +263,8 @@ def query_cases(
     top = _rank(rows, question, top_k)
     if not top:
         return ("No relevant cases found for that query. Try different search terms.", [])
+    if len(top) < max(1, int(cfg.get("min_sources", 1))):
+        return ("I don't have enough grounded sources in the archive to answer that reliably.", [])
 
     # --- Pass 1: summarise each case from its full text ---
     summarize_system = (
@@ -273,7 +289,7 @@ def query_cases(
             summary = _chat([
                 {"role": "system", "content": summarize_system},
                 {"role": "user",   "content": user_msg},
-            ], cfg)
+            ], cfg, model=cfg.get("fast_model"), temperature=0.0)
         except Exception as exc:
             log.warning("Pass-1 summary failed for %s: %s", label, exc)
             summary = f"(Summary unavailable for {label})"
@@ -286,7 +302,8 @@ def query_cases(
         "Answer the user's question using ONLY the provided case summaries. "
         "Cite each source by its [SOURCE N] label whenever you draw on it. "
         "If the summaries do not contain enough information, say so explicitly. "
-        "Do not invent facts, holdings, or citations."
+        "Do not invent facts, holdings, or citations. "
+        "If support is weak or ambiguous, refuse and explain that the archive is insufficient."
     )
     answer_user = (
         f"CASE SUMMARIES:\n\n{context}\n\n"
@@ -294,10 +311,26 @@ def query_cases(
         "Provide a clear, structured answer with source citations."
     )
 
-    answer = _chat([
-        {"role": "system", "content": answer_system},
-        {"role": "user",   "content": answer_user},
-    ], cfg)
+    try:
+        answer = _chat([
+            {"role": "system", "content": answer_system},
+            {"role": "user",   "content": answer_user},
+        ], cfg, model=cfg.get("accurate_model"))
+    except Exception:
+        answer = _extractive_fallback(question, top)
+
+    if cfg.get("require_citations", True):
+        cited = re.findall(r"\[SOURCE\s+\d+\]", answer)
+        if not cited:
+            answer = (
+                "I can't provide a grounded answer because the generated response lacked source citations. "
+                "Please review the retrieved sources directly."
+            )
+        elif len(set(cited)) < min(len(top), max(1, int(cfg.get("min_sources", 1)))):
+            answer = (
+                "I can't provide a grounded answer because too few retrieved sources supported it. "
+                "Please refine the query or inspect the listed sources directly."
+            )
 
     sources = [
         {
@@ -305,6 +338,7 @@ def query_cases(
             "ref_no": r.ref_no,
             "virtual_folder": r.virtual_folder,
             "source_url": r.source_url,
+            "retrieval_score": _score(r, set(_tokenize(question))),
         }
         for r in top
     ]

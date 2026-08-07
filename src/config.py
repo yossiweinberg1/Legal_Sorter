@@ -7,6 +7,7 @@ import yaml
 
 _CONFIG_CACHE = None
 REQUIRED_DIR_KEYS = ("pull_folder", "index_folder", "pending_folder")
+ALLOWED_ROLES = {"reader", "operator", "admin"}
 
 def _split_tokens(raw: str) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
@@ -21,6 +22,38 @@ def _normalize_tokens(tokens: list[str]) -> list[str]:
             continue
         normalized.append(t)
     return normalized
+
+
+def _parse_bool(raw: str | None) -> bool | None:
+    if raw is None:
+        return None
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _parse_api_keys(raw: str) -> list[dict]:
+    parsed: list[dict] = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(
+                "LEGAL_SORTER_API_KEYS entries must be in role:key format."
+            )
+        role, key = item.split(":", 1)
+        role = role.strip().lower()
+        key = key.strip()
+        if role not in ALLOWED_ROLES:
+            raise ValueError(f"Unsupported auth role: {role}")
+        if not key:
+            raise ValueError("Auth API keys must not be empty.")
+        parsed.append({"role": role, "key": key})
+    return parsed
 
 def _apply_env_overrides(cfg: dict) -> dict:
     cl_cfg = cfg.setdefault("courtlistener", {})
@@ -41,6 +74,22 @@ def _apply_env_overrides(cfg: dict) -> dict:
     if env_base:
         cl_cfg["base_url"] = env_base.strip()
 
+    auth_cfg = cfg.setdefault("auth", {})
+    auth_enabled = _parse_bool(os.getenv("LEGAL_SORTER_AUTH_ENABLED"))
+    if auth_enabled is not None:
+        auth_cfg["enabled"] = auth_enabled
+    auth_keys = os.getenv("LEGAL_SORTER_API_KEYS")
+    if auth_keys:
+        auth_cfg["api_keys"] = _parse_api_keys(auth_keys)
+
+    prod_cfg = cfg.setdefault("production", {})
+    backup_folder = os.getenv("LEGAL_SORTER_BACKUP_FOLDER")
+    if backup_folder:
+        prod_cfg["backup_folder"] = backup_folder.strip()
+    audit_log_path = os.getenv("LEGAL_SORTER_AUDIT_LOG_PATH")
+    if audit_log_path:
+        prod_cfg["audit_log_path"] = audit_log_path.strip()
+
     return cfg
 
 
@@ -49,17 +98,30 @@ def _inject_defaults(cfg: dict) -> dict:
     llm_cfg.setdefault("base_url", "https://api.openai.com/v1")
     llm_cfg.setdefault("api_key", "")
     llm_cfg.setdefault("model", "gpt-4o-mini")
+    llm_cfg.setdefault("fast_model", llm_cfg.get("model", "gpt-4o-mini"))
+    llm_cfg.setdefault("accurate_model", llm_cfg.get("model", "gpt-4o-mini"))
     llm_cfg.setdefault("max_context_chars", 12000)
+    llm_cfg.setdefault("require_citations", True)
+    llm_cfg.setdefault("min_sources", 1)
+    llm_cfg.setdefault("timeout_seconds", 60)
 
     prod_cfg = cfg.setdefault("production", {})
     prod_cfg.setdefault("enabled", False)
     prod_cfg.setdefault("support_email", "")
     prod_cfg.setdefault("backup_folder", "")
     prod_cfg.setdefault("audit_log_path", "logs/audit.log")
+    prod_cfg.setdefault("quarantine_folder", "quarantine")
+    prod_cfg.setdefault("retention_days", 365)
+    prod_cfg.setdefault("telemetry_enabled", True)
     qg_cfg = prod_cfg.setdefault("quality_gate", {})
     qg_cfg.setdefault("citation_f1_min", 0.70)
     qg_cfg.setdefault("entity_f1_min", 0.60)
     qg_cfg.setdefault("min_cases", 1)
+    qg_cfg.setdefault("baseline_file", "tests/fixtures/gold_baseline.json")
+
+    auth_cfg = cfg.setdefault("auth", {})
+    auth_cfg.setdefault("enabled", False)
+    auth_cfg.setdefault("api_keys", [])
     return cfg
 
 
@@ -88,6 +150,13 @@ def validate_config(cfg: dict, strict: bool = False) -> tuple[list[str], list[st
             errors.append("llm.max_context_chars must be >= 1000.")
     except Exception:
         errors.append("llm.max_context_chars must be an integer.")
+    for key in ("min_sources", "timeout_seconds"):
+        value = llm_cfg.get(key, 1)
+        try:
+            if int(value) < 1:
+                errors.append(f"llm.{key} must be >= 1.")
+        except Exception:
+            errors.append(f"llm.{key} must be an integer.")
 
     prod_cfg = cfg.get("production", {}) or {}
     if strict:
@@ -100,6 +169,14 @@ def validate_config(cfg: dict, strict: bool = False) -> tuple[list[str], list[st
             warnings.append("production.support_email is not set.")
         if not str(prod_cfg.get("backup_folder", "")).strip():
             warnings.append("production.backup_folder is not set.")
+    for key in ("audit_log_path", "quarantine_folder"):
+        if not str(prod_cfg.get(key, "")).strip():
+            errors.append(f"production.{key} must be a non-empty string path.")
+    try:
+        if int(prod_cfg.get("retention_days", 365)) < 1:
+            errors.append("production.retention_days must be >= 1.")
+    except Exception:
+        errors.append("production.retention_days must be an integer.")
 
     qg_cfg = prod_cfg.get("quality_gate", {}) or {}
     for key in ("citation_f1_min", "entity_f1_min"):
@@ -115,6 +192,29 @@ def validate_config(cfg: dict, strict: bool = False) -> tuple[list[str], list[st
             errors.append("production.quality_gate.min_cases must be >= 1.")
     except Exception:
         errors.append("production.quality_gate.min_cases must be an integer.")
+
+    auth_cfg = cfg.get("auth", {}) or {}
+    api_keys = auth_cfg.get("api_keys", [])
+    if not isinstance(api_keys, list):
+        errors.append("auth.api_keys must be a list.")
+    else:
+        seen_keys = set()
+        for entry in api_keys:
+            if not isinstance(entry, dict):
+                errors.append("auth.api_keys entries must be mappings with role/key.")
+                continue
+            role = str(entry.get("role", "")).strip().lower()
+            key = str(entry.get("key", "")).strip()
+            if role not in ALLOWED_ROLES:
+                errors.append(f"auth.api_keys role must be one of: {', '.join(sorted(ALLOWED_ROLES))}.")
+            if not key:
+                errors.append("auth.api_keys key must be non-empty.")
+            if key:
+                if key in seen_keys:
+                    errors.append("auth.api_keys must not contain duplicate keys.")
+                seen_keys.add(key)
+    if bool(auth_cfg.get("enabled")) and not api_keys:
+        errors.append("auth.api_keys is required when auth.enabled is true.")
 
     return errors, warnings
 
@@ -147,6 +247,14 @@ def load_config(path: str = None, strict: bool = False) -> dict:
     backup_folder = str(cfg.get("production", {}).get("backup_folder", "")).strip()
     if backup_folder:
         Path(backup_folder).mkdir(parents=True, exist_ok=True)
+    for key in ("audit_log_path", "quarantine_folder"):
+        raw = str(cfg.get("production", {}).get(key, "")).strip()
+        if raw:
+            path = Path(raw)
+            if key == "audit_log_path":
+                path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                path.mkdir(parents=True, exist_ok=True)
 
     _CONFIG_CACHE = cfg
     return cfg

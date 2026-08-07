@@ -40,6 +40,31 @@ CREATE TABLE IF NOT EXISTS cross_references (
     PRIMARY KEY (from_doc_id, to_doc_id, citation)
 );
 
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
+    job_id TEXT PRIMARY KEY,
+    source_path TEXT,
+    source_url TEXT,
+    state TEXT,
+    doc_id TEXT,
+    content_hash TEXT,
+    source_fingerprint TEXT,
+    source_mtime TEXT,
+    attempts INTEGER DEFAULT 0,
+    quarantined_path TEXT,
+    error_type TEXT,
+    error_details TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS backup_history (
+    backup_id TEXT PRIMARY KEY,
+    archive_path TEXT,
+    verified_ok INTEGER DEFAULT 0,
+    details_json TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS ref_counter (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     next_value INTEGER DEFAULT 1
@@ -49,6 +74,8 @@ CREATE INDEX IF NOT EXISTS idx_documents_added_at ON documents (added_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_virtual_folder ON documents (virtual_folder);
 CREATE INDEX IF NOT EXISTS idx_priority_queue_status ON priority_queue (status);
 CREATE INDEX IF NOT EXISTS idx_documents_source_url ON documents (source_url);
+CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_state ON ingestion_jobs (state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_doc_id ON ingestion_jobs (doc_id);
 """
 
 FTS_SETUP = """
@@ -112,6 +139,8 @@ class DB:
         for col_def in [
             "content_source TEXT DEFAULT 'full_text'",
             "sanity_check_passed INTEGER DEFAULT 1",
+            "source_fingerprint TEXT",
+            "document_version INTEGER DEFAULT 1",
         ]:
             col_name = col_def.split()[0]
             try:
@@ -169,17 +198,20 @@ class DB:
 
     def insert_document(self, doc_id, source_path, file_type, entities, citations, keywords, text,
                         source_url=None, virtual_folder=None,
-                        content_source="full_text", sanity_check_passed=1):
+                        content_source="full_text", sanity_check_passed=1,
+                        source_fingerprint=None, document_version=1):
         """Glues together and saves the fully parsed document metadata into the database."""
         self.conn.execute(
             """INSERT OR REPLACE INTO documents 
             (id, source_path, file_type, entities_json, citations_json, keywords_json, text,
-             source_url, virtual_folder, content_source, sanity_check_passed) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             source_url, virtual_folder, content_source, sanity_check_passed,
+             source_fingerprint, document_version) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 doc_id, source_path, file_type,
                 json.dumps(entities), json.dumps(citations), json.dumps(keywords),
                 text, source_url, virtual_folder, content_source, sanity_check_passed,
+                source_fingerprint, document_version,
             )
         )
         self.conn.commit()
@@ -307,6 +339,139 @@ class DB:
                 "virtual_folder": r[2],
                 "source_url": r[3],
                 "snippet": (r[4] or "").replace("\n", " ")[:400],
+            }
+            for r in rows
+        ]
+
+    # ---------- ingestion jobs ----------
+    def upsert_ingestion_job(
+        self,
+        *,
+        job_id: str,
+        source_path: str,
+        state: str,
+        source_url: str | None = None,
+        doc_id: str | None = None,
+        content_hash: str | None = None,
+        source_fingerprint: str | None = None,
+        source_mtime: str | None = None,
+        quarantined_path: str | None = None,
+        error_type: str | None = None,
+        error_details: str | None = None,
+        increment_attempt: bool = False,
+    ) -> None:
+        current_attempts = 0
+        existing = self.conn.execute(
+            "SELECT attempts FROM ingestion_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if existing:
+            current_attempts = int(existing[0] or 0)
+        attempts = current_attempts + 1 if increment_attempt else current_attempts
+        self.conn.execute(
+            """INSERT INTO ingestion_jobs
+               (job_id, source_path, source_url, state, doc_id, content_hash,
+                source_fingerprint, source_mtime, attempts, quarantined_path,
+                error_type, error_details, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(job_id) DO UPDATE SET
+                 source_path=excluded.source_path,
+                 source_url=excluded.source_url,
+                 state=excluded.state,
+                 doc_id=excluded.doc_id,
+                 content_hash=excluded.content_hash,
+                 source_fingerprint=excluded.source_fingerprint,
+                 source_mtime=excluded.source_mtime,
+                 attempts=excluded.attempts,
+                 quarantined_path=excluded.quarantined_path,
+                 error_type=excluded.error_type,
+                 error_details=excluded.error_details,
+                 updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                job_id,
+                source_path,
+                source_url,
+                state,
+                doc_id,
+                content_hash,
+                source_fingerprint,
+                source_mtime,
+                attempts,
+                quarantined_path,
+                error_type,
+                error_details,
+            ),
+        )
+        self.conn.commit()
+
+    def get_ingestion_job(self, job_id: str) -> dict | None:
+        row = self.conn.execute(
+            """SELECT job_id, source_path, source_url, state, doc_id, content_hash,
+                      source_fingerprint, source_mtime, attempts, quarantined_path,
+                      error_type, error_details, created_at, updated_at
+               FROM ingestion_jobs WHERE job_id = ?""",
+            (job_id,),
+        ).fetchone()
+        if not row:
+            return None
+        keys = [
+            "job_id", "source_path", "source_url", "state", "doc_id", "content_hash",
+            "source_fingerprint", "source_mtime", "attempts", "quarantined_path",
+            "error_type", "error_details", "created_at", "updated_at",
+        ]
+        return dict(zip(keys, row))
+
+    def list_ingestion_jobs(self, state: str | None = None, limit: int = 100) -> list[dict]:
+        params: tuple = ()
+        query = """SELECT job_id, source_path, source_url, state, doc_id, attempts,
+                          quarantined_path, error_type, error_details, updated_at
+                   FROM ingestion_jobs"""
+        if state:
+            query += " WHERE state = ?"
+            params = (state,)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params = params + (limit,)
+        rows = self.conn.execute(query, params).fetchall()
+        return [
+            {
+                "job_id": r[0],
+                "source_path": r[1],
+                "source_url": r[2],
+                "state": r[3],
+                "doc_id": r[4],
+                "attempts": r[5],
+                "quarantined_path": r[6],
+                "error_type": r[7],
+                "error_details": r[8],
+                "updated_at": r[9],
+            }
+            for r in rows
+        ]
+
+    # ---------- backup history ----------
+    def record_backup(self, backup_id: str, archive_path: str, verified_ok: bool, details: dict | None = None) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO backup_history
+               (backup_id, archive_path, verified_ok, details_json, created_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (backup_id, archive_path, 1 if verified_ok else 0, json.dumps(details or {})),
+        )
+        self.conn.commit()
+
+    def list_backups(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT backup_id, archive_path, verified_ok, details_json, created_at
+               FROM backup_history ORDER BY created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "backup_id": r[0],
+                "archive_path": r[1],
+                "verified_ok": bool(r[2]),
+                "details": json.loads(r[3]) if r[3] else {},
+                "created_at": r[4],
             }
             for r in rows
         ]
