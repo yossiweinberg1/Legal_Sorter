@@ -296,11 +296,11 @@ def load_config(path: str = None, strict: bool = False) -> dict:
     for key in ("audit_log_path", "quarantine_folder"):
         raw = str(cfg.get("production", {}).get(key, "")).strip()
         if raw:
-            path = Path(raw)
+            prod_path = Path(raw)
             if key == "audit_log_path":
-                path.parent.mkdir(parents=True, exist_ok=True)
+                prod_path.parent.mkdir(parents=True, exist_ok=True)
             else:
-                path.mkdir(parents=True, exist_ok=True)
+                prod_path.mkdir(parents=True, exist_ok=True)
 
     _CONFIG_CACHE[cache_key] = cfg
     return cfg
