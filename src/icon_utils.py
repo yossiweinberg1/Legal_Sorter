@@ -202,8 +202,9 @@ def make_icon_ico(dest: Path) -> None:
     """Write the Windows .ico variant of the shared Legal Sorter logo."""
     size = 128
     png = _logo_png_bytes(size)
+    ico_dim = size if size < 256 else 0
     ico_header = struct.pack("<HHH", 0, 1, 1)
-    ico_entry = struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(png), 22)
+    ico_entry = struct.pack("<BBBBHHII", ico_dim, ico_dim, 0, 0, 1, 32, len(png), 22)
     dest.write_bytes(ico_header + ico_entry + png)
 
 
