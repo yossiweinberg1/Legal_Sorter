@@ -186,9 +186,15 @@ def make_logo_png(dest: Path, size: int = 256) -> None:
     dest.write_bytes(_logo_png_bytes(size))
 
 
-def ensure_logo_png(dest: Path, size: int = 256) -> str:
-    """Generate the shared Legal Sorter logo PNG (always regenerated)."""
-    make_logo_png(dest, size=size)
+def ensure_logo_png(dest: Path, size: int = 256, force: bool = True) -> str:
+    """Generate the shared Legal Sorter logo PNG.
+
+    Pass ``force=False`` to skip regeneration when the file already exists.
+    The default regenerates on every call so stale cached icons are always
+    replaced with the current design.
+    """
+    if force or not dest.exists():
+        make_logo_png(dest, size=size)
     return str(dest)
 
 
@@ -207,7 +213,13 @@ def make_icon_ico(dest: Path) -> None:
     dest.write_bytes(ico_header + ico_entry + png)
 
 
-def ensure_icon(dest: Path) -> str:
-    """Generate the shared Legal Sorter .ico (always regenerated) and return its path."""
-    make_icon_ico(dest)
+def ensure_icon(dest: Path, force: bool = True) -> str:
+    """Generate the shared Legal Sorter .ico and return its path.
+
+    Pass ``force=False`` to skip regeneration when the file already exists.
+    The default regenerates on every call so stale cached icons are always
+    replaced with the current design.
+    """
+    if force or not dest.exists():
+        make_icon_ico(dest)
     return str(dest)

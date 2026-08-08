@@ -1627,12 +1627,10 @@ class LegalSorterApp:
                 return
             # Register in-memory
             TOKEN_REGISTRY[raw] = {"enabled": True, "cooldown_until": 0, "consecutive_429s": 0}
-            # Persist to config.yaml
+            # Persist to config.yaml (append to existing tokens)
             try:
-                from token_manager import update_config_token
                 cfg_all = cfgmod.load_config()
                 existing = cfg_all.get("courtlistener", {}).get("api_tokens", [])
-                # Append instead of overwriting, by writing directly
                 import yaml
                 cfg_path = Path(__file__).resolve().parent / "config.yaml"
                 cfg_all.setdefault("courtlistener", {})
