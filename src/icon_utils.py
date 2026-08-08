@@ -187,9 +187,8 @@ def make_logo_png(dest: Path, size: int = 256) -> None:
 
 
 def ensure_logo_png(dest: Path, size: int = 256) -> str:
-    """Generate the shared Legal Sorter logo PNG if needed."""
-    if not dest.exists():
-        make_logo_png(dest, size=size)
+    """Generate the shared Legal Sorter logo PNG (always regenerated)."""
+    make_logo_png(dest, size=size)
     return str(dest)
 
 
@@ -209,7 +208,6 @@ def make_icon_ico(dest: Path) -> None:
 
 
 def ensure_icon(dest: Path) -> str:
-    """Generate the shared Legal Sorter .ico if needed and return its path."""
-    if not dest.exists():
-        make_icon_ico(dest)
+    """Generate the shared Legal Sorter .ico (always regenerated) and return its path."""
+    make_icon_ico(dest)
     return str(dest)
