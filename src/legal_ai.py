@@ -109,6 +109,7 @@ class _CaseRow:
     barcode_confidence: float | None = None
     keywords: list[str] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
+    subsequent_history: list[dict] = field(default_factory=list)
 
 
 _MAX_LOAD = 2000  # max rows scanned for keyword ranking
@@ -252,6 +253,54 @@ def _safe_json(raw: Any, fallback: Any) -> Any:
         return fallback
 
 
+def _load_subsequent_history(db_path: str, doc_id: str, limit: int = 5) -> list[dict]:
+    try:
+        from .database import DB
+    except ImportError:
+        from database import DB  # type: ignore
+    db = DB(db_path)
+    try:
+        return db.get_subsequent_history(doc_id, limit=limit)
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
+def _load_subsequent_history_map(db_path: str, doc_ids: list[str], limit: int = 5) -> dict[str, list[dict]]:
+    try:
+        from .database import DB
+    except ImportError:
+        from database import DB  # type: ignore
+    db = DB(db_path)
+    try:
+        summary = db.get_subsequent_history_summary_map(doc_ids, limit=limit)
+        return {doc_id: data.get("items", []) for doc_id, data in summary.items()}
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
+def _subsequent_history_context(items: list[dict]) -> str:
+    if not items:
+        return "No later citing cases are recorded in the archive."
+    lines = []
+    for item in items[:5]:
+        label = item.get("ref_no") or (item.get("doc_id", "")[:12] + "…")
+        barcode = item.get("barcode") or "no-barcode"
+        year = item.get("year") or "unknown-year"
+        treatment = item.get("treatment") or "cited"
+        context = (item.get("context") or "").strip()
+        line = f"- {label} / {barcode} / {year} / {treatment}"
+        if context:
+            line += f": {context[:180]}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Keyword ranking (fast, no ML dependency)
 # ---------------------------------------------------------------------------
@@ -361,6 +410,7 @@ def query_cases(
         return ("I don't have enough grounded sources in the archive to answer that reliably.", [])
 
     # --- Pass 1: summarise each case from its full text ---
+    history_map = _load_subsequent_history_map(db_path, [r.doc_id for r in top], limit=4)
     summarize_system = (
         "You are a precise legal analyst. "
         "Given the full text of a court opinion, extract ONLY: "
@@ -379,6 +429,7 @@ def query_cases(
         user_msg = (
             f"CASE: {bc_label}\n"
             f"FOLDER: {r.virtual_folder or 'Uncategorized'}\n\n"
+            f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(history_map.get(r.doc_id, r.subsequent_history[:4]))}\n--- END SUBSEQUENT HISTORY ---\n\n"
             f"--- FULL CASE TEXT ---\n{r.text}\n--- END ---\n\n"
             "Extract the holding, key facts, and citations as instructed."
         )
@@ -438,6 +489,11 @@ def query_cases(
             "virtual_folder": r.virtual_folder,
             "source_url": r.source_url,
             "retrieval_score": _score(r, set(_tokenize(question))),
+            "source_preview": (r.text or "")[:2000],
+            "source_text": (r.text or "")[:12000],
+            "source_text_truncated": len(r.text or "") > 12000,
+            "citations": r.citations,
+            "subsequent_history": history_map.get(r.doc_id, r.subsequent_history[:3]),
         }
         for r in top
     ]
@@ -467,6 +523,7 @@ def analyze_case(
 
     label = row.ref_no or row.doc_id[:12]
     bc_label = f"{label} / {row.barcode}" if row.barcode else label
+    history_items = _load_subsequent_history_map(db_path, [row.doc_id], limit=5).get(row.doc_id, [])
 
     system_msg = (
         "You are an expert legal analyst. "
@@ -477,6 +534,7 @@ def analyze_case(
     user_msg = (
         f"CASE: {bc_label}\n"
         f"FOLDER: {row.virtual_folder or 'Uncategorized'}\n\n"
+        f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(history_items)}\n--- END SUBSEQUENT HISTORY ---\n\n"
         f"--- FULL CASE TEXT ---\n{row.text}\n--- END ---\n\n"
         f"INSTRUCTION: {instruction}"
     )

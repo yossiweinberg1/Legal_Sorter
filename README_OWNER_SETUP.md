@@ -12,6 +12,14 @@ If you want the fastest path to market, sell the web app first and keep the desk
 
 ## 2. Create local folders
 
+For a guided setup instead of manual folder creation, run:
+
+```bash
+python setup_wizard.py
+```
+
+That is the recommended first-run path for non-technical users.
+
 From the repo root, create these folders:
 
 ```bash

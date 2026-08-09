@@ -23,6 +23,10 @@ class ConfigTests(unittest.TestCase):
         os.environ.pop("LEGAL_SORTER_PULL_FOLDER", None)
         os.environ.pop("LEGAL_SORTER_INDEX_FOLDER", None)
         os.environ.pop("LEGAL_SORTER_PENDING_FOLDER", None)
+        os.environ.pop("LEGAL_SORTER_LLM_BASE_URL", None)
+        os.environ.pop("LEGAL_SORTER_LLM_MODEL", None)
+        os.environ.pop("LEGAL_SORTER_LLM_FAST_MODEL", None)
+        os.environ.pop("LEGAL_SORTER_LLM_ACCURATE_MODEL", None)
         os.environ.pop("LEGAL_SORTER_BACKUP_FOLDER", None)
         os.environ.pop("LEGAL_SORTER_AUDIT_LOG_PATH", None)
         os.environ.pop("LEGAL_SORTER_QUARANTINE_FOLDER", None)
@@ -178,6 +182,26 @@ courtlistener:
         )
         cfg = cfgmod.load_config(str(cfg_path))
         self.assertEqual(cfg["courtlistener"]["api_tokens"], ["dotenv-token"])
+
+    def test_llm_env_overrides_apply(self):
+        base = Path(self.tmp.name)
+        cfg_path = self._write_cfg(
+            f"""
+pull_folder: "{base / 'pull8'}"
+index_folder: "{base / 'index8'}"
+pending_folder: "{base / 'pending8'}"
+courtlistener:
+  base_url: "https://example.com"
+  api_tokens: []
+"""
+        )
+        os.environ["LEGAL_SORTER_LLM_BASE_URL"] = "http://localhost:11434/v1"
+        os.environ["LEGAL_SORTER_LLM_MODEL"] = "llama3"
+        os.environ["LEGAL_SORTER_LLM_FAST_MODEL"] = "llama3"
+        os.environ["LEGAL_SORTER_LLM_ACCURATE_MODEL"] = "llama3"
+        cfg = cfgmod.load_config(str(cfg_path))
+        self.assertEqual(cfg["llm"]["base_url"], "http://localhost:11434/v1")
+        self.assertEqual(cfg["llm"]["model"], "llama3")
 
 
 if __name__ == "__main__":

@@ -113,6 +113,11 @@ def search(
         from src.database import DB
         db = DB(_db_path())
         results = db.fts_search(q.strip(), limit=limit)
+        history_map = db.get_subsequent_history_summary_map([item["id"] for item in results], limit=3)
+        for item in results:
+            summary = history_map.get(item["id"], {"count": 0, "items": []})
+            item["subsequent_history"] = summary["items"]
+            item["subsequent_history_count"] = summary["count"]
         auditlog.log_event(_cfg(), "api.search", actor=principal["actor"], role=principal["role"], details={"query": q.strip(), "limit": limit, "count": len(results)})
         return {"query": q, "count": len(results), "results": results}
     except Exception as exc:
@@ -122,18 +127,25 @@ def search(
 @app.get("/api/case/{doc_id}", tags=["Cases"])
 def get_case(doc_id: str, principal: dict = Depends(require_reader)):
     """Retrieve full metadata and text for a single indexed case."""
+    db = None
     try:
-        with sqlite3.connect(_db_path()) as conn:
-            row = conn.execute(
-                """SELECT id, ref_no, virtual_folder, source_url, file_type,
-                          entities_json, citations_json, keywords_json,
-                          SUBSTR(text, 1, 8000) as preview, added_at,
-                          barcode, barcode_strategy, barcode_confidence, barcode_confirmed
-                   FROM documents WHERE id = ?""",
-                (doc_id,),
-            ).fetchone()
+        from src.database import DB
+        db = DB(_db_path())
+        row = db.conn.execute(
+            """SELECT id, ref_no, virtual_folder, source_url, file_type,
+                      entities_json, citations_json, keywords_json,
+                      added_at, barcode, barcode_strategy,
+                      barcode_confidence, barcode_confirmed, text
+               FROM documents WHERE id = ?""",
+            (doc_id,),
+        ).fetchone()
+        cited_cases = db.get_cross_references(doc_id)
+        subsequent_history = db.get_subsequent_history(doc_id, limit=20)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if db is not None:
+            db.conn.close()
 
     if not row:
         raise HTTPException(status_code=404, detail=f"Case {doc_id[:12]} not found.")
@@ -144,6 +156,8 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         except Exception:
             return []
 
+    full_text = row[13] or ""
+    full_text_cap = 12000
     result = {
         "id": row[0],
         "ref_no": row[1],
@@ -153,15 +167,39 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         "entities": _j(row[5]),
         "citations": _j(row[6]),
         "keywords": _j(row[7]),
-        "preview": (row[8] or "").replace("\n", " ").strip(),
-        "added_at": row[9],
-        "barcode": row[10],
-        "barcode_strategy": row[11],
-        "barcode_confidence": row[12],
-        "barcode_confirmed": bool(row[13]) if row[13] is not None else False,
+        "preview": (full_text[:8000]).replace("\n", " ").strip(),
+        "added_at": row[8],
+        "barcode": row[9],
+        "barcode_strategy": row[10],
+        "barcode_confidence": row[11],
+        "barcode_confirmed": bool(row[12]) if row[12] is not None else False,
+        "full_text": full_text[:full_text_cap],
+        "full_text_truncated": len(full_text) > full_text_cap,
+        "cited_cases": cited_cases,
+        "subsequent_history": subsequent_history,
     }
     auditlog.log_event(_cfg(), "api.case", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "ref_no": row[1]})
     return result
+
+
+@app.get("/api/case/{doc_id}/subsequent_history", tags=["Cases"])
+def get_case_subsequent_history(
+    doc_id: str,
+    limit: int = Query(default=20, le=100),
+    principal: dict = Depends(require_reader),
+):
+    db = None
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        items = db.get_subsequent_history(doc_id, limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if db is not None:
+            db.conn.close()
+    auditlog.log_event(_cfg(), "api.case_subsequent_history", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "limit": limit, "count": len(items)})
+    return {"doc_id": doc_id, "count": len(items), "results": items}
 
 
 @app.get("/api/cases", tags=["Cases"])
@@ -173,22 +211,29 @@ def list_cases(
 ):
     """List indexed cases, optionally filtered by virtual folder."""
     try:
-        with sqlite3.connect(_db_path()) as conn:
-            if folder:
-                rows = conn.execute(
-                    """SELECT id, ref_no, virtual_folder, source_url, added_at,
-                              barcode, barcode_confidence
-                       FROM documents WHERE virtual_folder LIKE ?
-                       ORDER BY added_at DESC LIMIT ? OFFSET ?""",
-                    (f"{folder}%", limit, offset),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT id, ref_no, virtual_folder, source_url, added_at,
-                              barcode, barcode_confidence
-                       FROM documents ORDER BY added_at DESC LIMIT ? OFFSET ?""",
-                    (limit, offset),
-                ).fetchall()
+        from src.database import DB
+        db = DB(_db_path())
+        try:
+            history_map = {}
+            with sqlite3.connect(_db_path()) as conn:
+                if folder:
+                    rows = conn.execute(
+                        """SELECT id, ref_no, virtual_folder, source_url, added_at,
+                                  barcode, barcode_confidence
+                           FROM documents WHERE virtual_folder LIKE ?
+                           ORDER BY added_at DESC LIMIT ? OFFSET ?""",
+                        (f"{folder}%", limit, offset),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT id, ref_no, virtual_folder, source_url, added_at,
+                                  barcode, barcode_confidence
+                           FROM documents ORDER BY added_at DESC LIMIT ? OFFSET ?""",
+                        (limit, offset),
+                    ).fetchall()
+            history_map = db.get_subsequent_history_summary_map([r[0] for r in rows], limit=3)
+        finally:
+            db.conn.close()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -204,6 +249,7 @@ def list_cases(
                 "added_at": r[4],
                 "barcode": r[5],
                 "barcode_confidence": r[6],
+                "subsequent_history": history_map.get(r[0], {}).get("items", []),
             }
             for r in rows
         ],
@@ -786,6 +832,34 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 13px;
     margin-top: 10px;
   }
+  .workspace-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .workspace-pane {
+    background: var(--color-canvas-default);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--border-radius-small);
+    padding: 10px;
+    min-height: 180px;
+  }
+  .workspace-pane h4 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    color: var(--color-accent-fg);
+  }
+  .workspace-scroll {
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .workspace-list { margin: 0; padding-left: 18px; }
+  .workspace-list li { margin: 4px 0; }
+  .workspace-neg { color: var(--color-danger-fg); font-weight: 600; }
 
   /* ── Misc ────────────────────────────────────────────── */
   .muted { color: var(--color-fg-muted); font-size: 12px; }
@@ -798,6 +872,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   @media (max-width: 720px) {
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     .btn { padding: 5px 10px; font-size: 13px; }
+    .workspace-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -833,6 +908,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   <!-- Tab bar -->
   <div class="gh-tabs">
     <button class="gh-tab active" onclick="switchTab('search',this)">🔍 Search <span class="count" id="tab-search-count"></span></button>
+    <button class="gh-tab" onclick="switchTab('workspace',this)">🧩 Case Workspace</button>
     <button class="gh-tab" onclick="switchTab('ingest',this)">⬆ Bulk Ingest</button>
     <button class="gh-tab" onclick="switchTab('recent',this)">🕐 Recent Cases</button>
     <button class="gh-tab" onclick="switchTab('ai',this)">🤖 AI Assistant</button>
@@ -850,6 +926,26 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
           <button class="btn" onclick="clearSearch()">Clear</button>
         </div>
         <div id="search-results" class="result-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CASE WORKSPACE panel ──────────────────────────── -->
+  <div id="panel-workspace" class="panel">
+    <div class="gh-box">
+      <div class="gh-box-header">Case Workspace</div>
+      <div class="gh-box-body">
+        <div class="row">
+          <input id="workspace-doc-id" class="gh-input" type="text" placeholder="Paste document id…" />
+          <button class="btn btn-primary" onclick="loadCaseWorkspace()">Open</button>
+        </div>
+        <div id="workspace-status" class="muted" style="margin-top:8px">Open a case from Search/Recent or enter a document id.</div>
+        <div class="workspace-grid">
+          <div class="workspace-pane"><h4>📄 Case Text</h4><div id="workspace-case" class="workspace-scroll muted">No case loaded.</div></div>
+          <div class="workspace-pane"><h4>📚 Citations</h4><div id="workspace-citations" class="workspace-scroll muted">No case loaded.</div></div>
+          <div class="workspace-pane"><h4>⚖️ Rulings</h4><div id="workspace-rulings" class="workspace-scroll muted">No case loaded.</div></div>
+          <div class="workspace-pane"><h4>🧭 Subsequent History</h4><div id="workspace-history" class="workspace-scroll muted">No case loaded.</div></div>
+        </div>
       </div>
     </div>
   </div>
@@ -913,6 +1009,11 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
           <button id="ask-btn" class="btn btn-primary" onclick="doAsk()">Ask AI</button>
         </div>
         <div id="ask-results"></div>
+        <div class="workspace-grid">
+          <div class="workspace-pane"><h4>🧠 LLM Answer</h4><div id="ai-answer" class="workspace-scroll muted">No answer yet.</div></div>
+          <div class="workspace-pane"><h4>🔗 Sources</h4><div id="ai-sources" class="workspace-scroll muted">No sources yet.</div></div>
+          <div class="workspace-pane" style="grid-column: 1 / -1;"><h4>📖 Full Source Content</h4><div id="ai-source-full" class="workspace-scroll muted">Select a source after asking a question.</div></div>
+        </div>
       </div>
     </div>
   </div>
@@ -965,12 +1066,17 @@ function resultCard(item) {
   const folder  = escapeHtml(item.virtual_folder || 'Uncategorized');
   const snippet = escapeHtml(item.snippet || '');
   const src     = safeSourceLink(item.source_url) || '<span class="muted">No source URL</span>';
+  const history = (item.subsequent_history || []).map(h =>
+    `<li>${escapeHtml(h.ref_no || (h.doc_id || '').slice(0,12) || '?')} · ${escapeHtml(h.year || 'year?')} · ${escapeHtml(h.treatment || 'cited')}</li>`
+  ).join('');
   return `
     <div class="result-item">
       <div class="ref">${ref}</div>
       <div class="meta">📁 ${folder}</div>
       <div class="snip">${snippet}</div>
+      ${history ? `<div class="meta"><strong>Subsequent history</strong><ul style="margin:4px 0">${history}</ul></div>` : ''}
       <div class="meta">${src}</div>
+      ${item.id ? `<div style="margin-top:8px"><button class="btn js-open-workspace" data-doc-id="${escapeHtml(item.id)}">Open workspace</button></div>` : ''}
     </div>`;
 }
 async function doSearch() {
@@ -1049,9 +1155,70 @@ async function loadRecentCases() {
             <div class="ref">${escapeHtml(c.ref_no||'N/A')}</div>
             <div class="meta">📁 ${escapeHtml(c.virtual_folder||'Uncategorized')}</div>
             <div class="meta">${escapeHtml(c.added_at||'')}</div>
+            ${((c.subsequent_history||[]).length) ? `<div class="meta"><strong>Subsequent history</strong>: ${(c.subsequent_history||[]).map(h => `${escapeHtml(h.ref_no || (h.doc_id||'').slice(0,12) || '?')} · ${escapeHtml(h.treatment || 'cited')}`).join('; ')}</div>` : ''}
+            ${c.id ? `<div style="margin-top:8px"><button class="btn js-open-workspace" data-doc-id="${escapeHtml(c.id)}">Open workspace</button></div>` : ''}
           </div>`).join('')
       : '<div class="muted">No cases found.</div>';
   } catch(_) { tgt.innerHTML = '<div class="danger">Failed to load case list.</div>'; }
+}
+
+function _rulingLogic(entities) {
+  if (!entities || typeof entities !== 'object') return 'No explicit ruling logic extracted.';
+  const raw = entities.RULING_LOGIC;
+  if (!raw) return 'No explicit ruling logic extracted.';
+  if (Array.isArray(raw)) return raw.join('\n');
+  return String(raw);
+}
+
+async function loadCaseWorkspace(docIdValue = null) {
+  const idInput = document.getElementById('workspace-doc-id');
+  const docId = (docIdValue || (idInput ? idInput.value.trim() : '')).trim();
+  const status = document.getElementById('workspace-status');
+  const casePane = document.getElementById('workspace-case');
+  const citationsPane = document.getElementById('workspace-citations');
+  const rulingsPane = document.getElementById('workspace-rulings');
+  const historyPane = document.getElementById('workspace-history');
+  if (!docId) {
+    status.textContent = 'Enter a document id first.';
+    return;
+  }
+  if (idInput) idInput.value = docId;
+  status.textContent = 'Loading workspace…';
+  try {
+    const d = await (await fetch('/api/case/' + encodeURIComponent(docId))).json();
+    if (d.detail) throw new Error(String(d.detail));
+    casePane.textContent = (d.full_text || d.preview || '').trim() || 'No text available.';
+    const citations = Array.isArray(d.citations) ? d.citations : [];
+    citationsPane.innerHTML = citations.length
+      ? `<ul class="workspace-list">${citations.map(c => `<li>${escapeHtml(String(c))}</li>`).join('')}</ul>`
+      : '<span class="muted">No citations found.</span>';
+    rulingsPane.textContent = _rulingLogic(d.entities);
+    const history = Array.isArray(d.subsequent_history) ? d.subsequent_history : [];
+    historyPane.innerHTML = history.length
+      ? `<ul class="workspace-list">${history.map(h => {
+          const treatment = String(h.treatment || 'cited');
+          const cls = ['overruled','criticized','limited'].includes(treatment.toLowerCase()) ? 'workspace-neg' : '';
+          const label = escapeHtml(h.ref_no || (h.doc_id || '').slice(0,12) || '?');
+          const yr = escapeHtml(String(h.year || 'year?'));
+          const ctx = escapeHtml(String(h.context || ''));
+          return `<li><span class="${cls}">${label} · ${yr} · ${escapeHtml(treatment)}</span>${ctx ? `<br/><span class="muted">${ctx}</span>` : ''}</li>`;
+        }).join('')}</ul>`
+      : '<span class="muted">No subsequent history recorded.</span>';
+    status.textContent = `Loaded workspace for ${d.ref_no || docId}.`;
+  } catch (err) {
+    status.textContent = 'Failed to load workspace.';
+    casePane.textContent = '';
+    citationsPane.innerHTML = '';
+    rulingsPane.textContent = '';
+    historyPane.innerHTML = `<span class="danger">${escapeHtml(String(err))}</span>`;
+  }
+}
+
+function openCaseWorkspace(encodedDocId) {
+  const docId = String(encodedDocId || '').trim();
+  const tabBtn = Array.from(document.querySelectorAll('.gh-tab')).find(b => b.textContent.includes('Case Workspace'));
+  if (tabBtn) switchTab('workspace', tabBtn);
+  loadCaseWorkspace(docId);
 }
 
 /* ── AI Ask ──────────────────────────────────────────── */
@@ -1070,22 +1237,57 @@ async function doAsk() {
     const d = await r.json();
     if (!r.ok) { tgt.innerHTML = `<div class="danger">${escapeHtml(d.detail||'LLM request failed.')}</div>`; return; }
     const answer  = escapeHtml(d.answer||'No answer returned.');
-    const sources = (d.sources||[]).map(s => {
+    const answerPane = document.getElementById('ai-answer');
+    const sourcesPane = document.getElementById('ai-sources');
+    const fullPane = document.getElementById('ai-source-full');
+    answerPane.innerHTML = `<div class="answer-box">${answer}</div>`;
+    const sources = (d.sources||[]).map((s, idx) => {
       const lbl  = `${escapeHtml(s.ref_no||(s.doc_id||'').slice(0,12)||'?')} — ${escapeHtml(s.virtual_folder||'Uncategorized')}`;
       const link = s.source_url ? ` ${safeSourceLink(s.source_url,'↗')}` : '';
-      return `<li>${lbl}${link}</li>`;
+      return `<li><button class="btn" onclick="showAiSource(${idx})">Open</button> ${lbl}${link}</li>`;
     }).join('');
-    tgt.innerHTML = `
-      <div class="answer-box">${answer}</div>
-      ${sources ? `<div class="muted" style="margin-top:10px"><strong>Sources</strong><ul style="margin:4px 0">${sources}</ul></div>` : ''}`;
+    window.__aiSources = Array.isArray(d.sources) ? d.sources : [];
+    sourcesPane.innerHTML = sources ? `<ul class="workspace-list">${sources}</ul>` : '<span class="muted">No sources returned.</span>';
+    if (window.__aiSources.length) {
+      showAiSource(0);
+    } else {
+      fullPane.textContent = 'No source content available.';
+    }
+    tgt.innerHTML = `<div class="muted">Done. ${window.__aiSources.length} source(s) returned.</div>`;
   } catch(_) {
     tgt.innerHTML = '<div class="danger">AI request failed.</div>';
   } finally { btn.disabled = false; }
 }
 
+async function showAiSource(index) {
+  const sources = Array.isArray(window.__aiSources) ? window.__aiSources : [];
+  const s = sources[index];
+  const fullPane = document.getElementById('ai-source-full');
+  if (!s) {
+    fullPane.textContent = 'Source not found.';
+    return;
+  }
+  const label = `${s.ref_no || (s.doc_id || '').slice(0,12) || '?'} — ${s.virtual_folder || 'Uncategorized'}`;
+  let text = (s.source_text || s.source_preview || '').trim();
+  if (!text && s.doc_id) {
+    try {
+      const d = await (await fetch('/api/case/' + encodeURIComponent(s.doc_id))).json();
+      text = (d.full_text || d.preview || '').trim();
+    } catch(_) {}
+  }
+  fullPane.innerHTML = `<strong>${escapeHtml(label)}</strong>\n\n${escapeHtml(text || 'No source text available.')}`;
+}
+
 /* ── Boot ────────────────────────────────────────────── */
 document.getElementById('search-input').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
 document.getElementById('folder-filter') && document.getElementById('folder-filter').addEventListener('keydown', e => { if (e.key==='Enter') loadRecentCases(); });
+document.getElementById('workspace-doc-id') && document.getElementById('workspace-doc-id').addEventListener('keydown', e => { if (e.key==='Enter') loadCaseWorkspace(); });
+document.addEventListener('click', (event) => {
+  const btn = event.target.closest('.js-open-workspace');
+  if (!btn) return;
+  const docId = btn.getAttribute('data-doc-id') || '';
+  openCaseWorkspace(docId);
+});
 loadStats();
 </script>
 </body>

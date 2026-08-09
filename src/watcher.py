@@ -46,6 +46,7 @@ from . import tagger
 from . import organizer
 from . import analyzer
 from . import barcode as barcode_mod
+from .citation_history import extract_citation_relationships
 from . import audit
 from .database import DB
 
@@ -454,14 +455,28 @@ def process_file(file_path: str, cfg: dict, db: DB):
     tags.keywords = sorted(list(set(tags.keywords + analysis.suggested_tags)))
 
     self_citation = tagger.extract_self_citation(text_content, tags.citations)
+    citation_relationships = extract_citation_relationships(
+        text_content,
+        tags.citations,
+        self_citation=self_citation,
+    )
 
-    for citation in tags.citations:
-        if citation == self_citation:
-            continue
+    for relation in citation_relationships:
+        citation = relation["citation"]
         existing_doc_id = db.lookup_citation(citation)
+        db.add_cross_reference(
+            doc_id,
+            existing_doc_id,
+            citation,
+            treatment=relation["treatment"],
+            context_snippet=relation["context"],
+            citation_key=relation["citation_key"],
+        )
         if existing_doc_id and existing_doc_id != doc_id:
-            db.add_cross_reference(doc_id, existing_doc_id, citation)
-            log.info(f"  [x-ref] This case cites an already-indexed case: {citation}")
+            log.info(
+                f"  [x-ref] This case cites an already-indexed case: {citation} "
+                f"({relation['treatment']})"
+            )
         elif not db.check_citation_indexed(citation):
             db.add_to_priority_queue(citation, doc_id)
 

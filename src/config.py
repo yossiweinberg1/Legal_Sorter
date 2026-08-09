@@ -126,6 +126,20 @@ def _apply_env_overrides(cfg: dict) -> dict:
     if auth_keys:
         auth_cfg["api_keys"] = _parse_api_keys(auth_keys)
 
+    llm_cfg = cfg.setdefault("llm", {})
+    llm_base_url = os.getenv("LEGAL_SORTER_LLM_BASE_URL")
+    if llm_base_url:
+        llm_cfg["base_url"] = llm_base_url.strip()
+    llm_model = os.getenv("LEGAL_SORTER_LLM_MODEL")
+    if llm_model:
+        llm_cfg["model"] = llm_model.strip()
+    llm_fast_model = os.getenv("LEGAL_SORTER_LLM_FAST_MODEL")
+    if llm_fast_model:
+        llm_cfg["fast_model"] = llm_fast_model.strip()
+    llm_accurate_model = os.getenv("LEGAL_SORTER_LLM_ACCURATE_MODEL")
+    if llm_accurate_model:
+        llm_cfg["accurate_model"] = llm_accurate_model.strip()
+
     prod_cfg = cfg.setdefault("production", {})
     backup_folder = os.getenv("LEGAL_SORTER_BACKUP_FOLDER")
     if backup_folder:

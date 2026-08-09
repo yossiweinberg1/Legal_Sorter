@@ -14,8 +14,8 @@ class WebAppAuthTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db_path = Path(self.tmp.name) / "legal_sorter.db"
-        db = DB(str(self.db_path))
-        db.conn.close()
+        self.db = DB(str(self.db_path))
+        self.addCleanup(self.db.conn.close)
         self.cfg = {
             "auth": {
                 "enabled": True,
@@ -45,6 +45,76 @@ class WebAppAuthTests(unittest.TestCase):
 
             resp = self.client.get("/api/admin/jobs", headers={"X-API-Key": "admin-key"})
             self.assertEqual(resp.status_code, 200)
+
+    def test_case_endpoint_includes_subsequent_history(self):
+        earlier = "doc-earlier"
+        later = "doc-later"
+        self.db.insert_document(
+            doc_id=earlier,
+            source_path="/tmp/earlier.txt",
+            file_type="txt",
+            entities={"DATE": ["January 1, 2020"]},
+            citations=["410 U.S. 113 (1973)"],
+            keywords=["constitutional"],
+            text="Smith v. Jones, 410 U.S. 113 (1973). Decided January 1, 2020 by the California Supreme Court.",
+            source_url="demo://earlier",
+            virtual_folder="Jurisdiction_CA/Constitutional",
+        )
+        self.db.assign_ref_no(earlier)
+        self.db.set_barcode(earlier, "LS-SC-US-CON-2020-000001", confidence=1.0)
+        self.db.insert_document(
+            doc_id=later,
+            source_path="/tmp/later.txt",
+            file_type="txt",
+            entities={"DATE": ["February 2, 2024"]},
+            citations=["600 U.S. 21 (2024)", "410 U.S. 113 (1973)"],
+            keywords=["constitutional"],
+            text="Brown v. Board Follow-On, 600 U.S. 21 (2024). The court overruled 410 U.S. 113 (1973).",
+            source_url="demo://later",
+            virtual_folder="Jurisdiction_CA/Constitutional",
+        )
+        self.db.assign_ref_no(later)
+        self.db.set_barcode(later, "LS-CA-CA9-CON-2024-000002", confidence=1.0)
+        self.db.rebuild_citation_relationships()
+
+        with patch.object(web_app, "_cfg", return_value=self.cfg), patch.object(web_app, "_db_path", return_value=str(self.db_path)):
+            resp = self.client.get(f"/api/case/{earlier}", headers={"X-API-Key": "reader-key"})
+            self.assertEqual(resp.status_code, 200)
+            body = resp.json()
+            self.assertEqual(body["subsequent_history"][0]["doc_id"], later)
+            self.assertEqual(body["subsequent_history"][0]["treatment"], "overruled")
+            self.assertIn("full_text", body)
+            self.assertIn("410 U.S. 113", body["full_text"])
+
+            hist = self.client.get(f"/api/case/{earlier}/subsequent_history", headers={"X-API-Key": "reader-key"})
+            self.assertEqual(hist.status_code, 200)
+            self.assertEqual(hist.json()["results"][0]["doc_id"], later)
+
+    def test_ask_endpoint_preserves_source_workspace_fields(self):
+        mocked_sources = [
+            {
+                "doc_id": "doc-1",
+                "ref_no": "LC-000001",
+                "virtual_folder": "Jurisdiction_CA/Constitutional",
+                "source_url": "https://example.com/source",
+                "source_preview": "preview text",
+                "source_text": "full source text",
+                "citations": ["410 U.S. 113 (1973)"],
+                "subsequent_history": [],
+            }
+        ]
+        with patch.object(web_app, "_cfg", return_value=self.cfg), \
+             patch.object(web_app, "_db_path", return_value=str(self.db_path)), \
+             patch("src.legal_ai.query_cases", return_value=("grounded answer [SOURCE 1]", mocked_sources)):
+            resp = self.client.post(
+                "/api/ask",
+                headers={"X-API-Key": "reader-key"},
+                json={"question": "What is the holding?", "top_k": 5},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["sources"][0]["source_text"], "full source text")
+        self.assertEqual(body["sources"][0]["citations"][0], "410 U.S. 113 (1973)")
 
 
 if __name__ == "__main__":

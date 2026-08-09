@@ -17,6 +17,8 @@ try:
     from src.evaluation import evaluate_jsonl, check_quality_gate, load_baseline
     from src.backup import create_backup, restore_backup
     from src.database import DB
+    from src.setup_wizard import run_cli_wizard, is_first_run
+    from src.demo_data import load_demo_data
 
 except ImportError as e:
     print(f"Error loading src.watcher: {e}")
@@ -58,6 +60,22 @@ def main():
         if args and args[0] == "health":
             print("[Command] Running local health check...")
             sys.exit(run_health_check())
+        elif args and args[0] == "setup":
+            sys.exit(run_cli_wizard())
+        elif args and args[0] == "load-demo-data":
+            result = load_demo_data()
+            print(json.dumps(result, indent=2))
+            sys.exit(0)
+        elif args and args[0] == "rebuild-citations":
+            cfgmod._CONFIG_CACHE = {}
+            cfg = cfgmod.load_config()
+            db = DB(str(Path(cfg["index_folder"]) / "legal_sorter.db"))
+            try:
+                result = db.rebuild_citation_relationships()
+            finally:
+                db.conn.close()
+            print(json.dumps(result, indent=2))
+            sys.exit(0)
         elif args and args[0] == "readiness":
             print("[Command] Running strict production-readiness check...")
             sys.exit(run_health_check(strict=True))
@@ -124,6 +142,12 @@ def main():
             print("[Command] Received 'crawl' signal. Initiating watcher loop...")
             run_forever()
         else:
+            if is_first_run():
+                print("[Setup] First-run setup has not been completed yet.")
+                print("[Setup] Starting the guided setup wizard...\n")
+                code = run_cli_wizard()
+                if code != 0:
+                    sys.exit(code)
             print("[Command] No specific command received. Defaulting to standard run.")
             run_forever()
             
