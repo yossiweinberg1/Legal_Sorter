@@ -44,7 +44,8 @@ from . import config as cfgmod
 from . import extractor
 from . import tagger
 from . import organizer
-from . import analyzer 
+from . import analyzer
+from . import barcode as barcode_mod
 from . import audit
 from .database import DB
 
@@ -479,6 +480,25 @@ def process_file(file_path: str, cfg: dict, db: DB):
         db.register_self_citation(self_citation, doc_id)
     log.info(f"  [#] Assigned reference number: {ref_no}")
 
+    # --- STRUCTURED BARCODE ID ---
+    barcode_cfg = cfg.get("barcode", {})
+    bc: str | None = None
+    if barcode_cfg.get("enabled", True):
+        try:
+            bc, bc_strategy = barcode_mod.assign_barcode(
+                text=text_content,
+                entities=tags.entities,
+                citations=tags.citations,
+                keywords=tags.keywords,
+                ref_no=ref_no,
+                cfg=cfg,
+                virtual_folder=virtual_folder,
+            )
+            db.set_barcode(doc_id, bc, strategy=bc_strategy)
+            log.info(f"  [B] Barcode ({bc_strategy}): {bc}")
+        except Exception as bc_err:
+            log.warning(f"  [B] Barcode generation failed: {bc_err}")
+
     archive_success = False
     try:
         clean_virtual = (virtual_folder or "Uncategorized").replace("\\\\", "/").replace("\\", "/")
@@ -515,7 +535,8 @@ def process_file(file_path: str, cfg: dict, db: DB):
         audit.log_event(
             cfg,
             "ingestion.completed",
-            details={"job_id": job_id, "doc_id": doc_id, "ref_no": ref_no, "source_url": source_url},
+            details={"job_id": job_id, "doc_id": doc_id, "ref_no": ref_no,
+                     "barcode": bc, "source_url": source_url},
         )
         log.info(f"Done: {p.name} -> {ref_no} [{virtual_folder}] (metadata indexed, original deleted)")
     else:

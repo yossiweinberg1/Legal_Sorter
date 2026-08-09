@@ -9,7 +9,7 @@ Segments
     LS   Namespace prefix – always literal "LS"
     CT   Case type     2 chars  e.g. SC, CA, DC, ST, SB, BR, OT
     JR   Jurisdiction  2-4 chars  e.g. US, CA9, NYS, TEX, UNK
-    SM   Subject matter 3 chars  e.g. CON, CRM, CIV, CON, TRT, FAM, IMM, OTH
+    SM   Subject matter 3 chars  e.g. CON, CRM, CIV, CTR, TRT, FAM, IMM, OTH
     YR   Decision year  4 digits  e.g. 2019  (0000 when unknown)
     SQ   Sequence       6 digits  ties back to the existing LC-XXXXXX ref_no
 
@@ -30,6 +30,16 @@ Generation strategies (controlled by config.barcode.strategy)
 
 The rule engine is authoritative for CT, JR, and YR; the LLM adds value for SM
 (subject matter) because legal topic classification benefits from reading the text.
+
+Prefix patterns
+---------------
+    barcode_prefix() returns a raw SQL LIKE pattern (e.g. ``"LS-CA-CA9-%"``).
+    Pass it directly to sql parameters — do NOT run it through any LIKE-escape
+    helper first, because the ``%`` wildcards are intentional.  The database
+    helpers DB.barcode_prefix_search() and DB.get_document_by_barcode() already
+    handle this correctly.  When calling sqlite3 directly, pass the pattern as-is:
+
+        conn.execute("SELECT ... WHERE barcode LIKE ?", (pattern,))
 """
 
 from __future__ import annotations
@@ -464,15 +474,23 @@ def barcode_prefix(
     sm: str | None = None,
     yr: str | None = None,
 ) -> str:
-    """Build a prefix string for fast SQL LIKE filtering.
+    """Build a raw SQL LIKE pattern for fast prefix filtering.
 
     Pass only the segments you want to constrain; omit the rest.
+    The returned string contains ``%`` wildcard characters and must be
+    passed directly to a SQL ``LIKE`` parameter — **do not** run it through
+    any LIKE-escape helper (doing so would turn the ``%`` wildcards into
+    literals, matching nothing).
 
     Examples:
-        barcode_prefix(jr="CA9")             → "LS-%-CA9-%"
-        barcode_prefix(ct="CA", jr="CA9")    → "LS-CA-CA9-%"
-        barcode_prefix(sm="CON")             → "LS-%-%-CON-%"
-        barcode_prefix(ct="SC", sm="CON")    → "LS-SC-%-CON-%"
+        barcode_prefix(jr="CA9")             → "LS-%-CA9-%-%-%" 
+        barcode_prefix(ct="CA", jr="CA9")    → "LS-CA-CA9-%-%-%" 
+        barcode_prefix(sm="CON")             → "LS-%-%-CON-%-%" 
+        barcode_prefix(ct="SC", sm="CON")    → "LS-SC-%-CON-%-%" 
+
+    Usage with sqlite3:
+        pattern = barcode_prefix(ct="CA", jr="CA9")
+        conn.execute("SELECT ... WHERE barcode LIKE ?", (pattern,))
     """
     ct_part = ct.upper() if ct else "%"
     jr_part = jr.upper() if jr else "%"
