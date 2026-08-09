@@ -269,6 +269,22 @@ def _load_subsequent_history(db_path: str, doc_id: str, limit: int = 5) -> list[
             pass
 
 
+def _load_subsequent_history_map(db_path: str, doc_ids: list[str], limit: int = 5) -> dict[str, list[dict]]:
+    try:
+        from .database import DB
+    except ImportError:
+        from database import DB  # type: ignore
+    db = DB(db_path)
+    try:
+        summary = db.get_subsequent_history_summary_map(doc_ids, limit=limit)
+        return {doc_id: data.get("items", []) for doc_id, data in summary.items()}
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
 def _subsequent_history_context(items: list[dict]) -> str:
     if not items:
         return "No later citing cases are recorded in the archive."
@@ -395,6 +411,7 @@ def query_cases(
         return ("I don't have enough grounded sources in the archive to answer that reliably.", [])
 
     # --- Pass 1: summarise each case from its full text ---
+    history_map = _load_subsequent_history_map(db_path, [r.doc_id for r in top], limit=4)
     summarize_system = (
         "You are a precise legal analyst. "
         "Given the full text of a court opinion, extract ONLY: "
@@ -413,7 +430,7 @@ def query_cases(
         user_msg = (
             f"CASE: {bc_label}\n"
             f"FOLDER: {r.virtual_folder or 'Uncategorized'}\n\n"
-            f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(_load_subsequent_history(db_path, r.doc_id, limit=4))}\n--- END SUBSEQUENT HISTORY ---\n\n"
+            f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(history_map.get(r.doc_id, r.subsequent_history[:4]))}\n--- END SUBSEQUENT HISTORY ---\n\n"
             f"--- FULL CASE TEXT ---\n{r.text}\n--- END ---\n\n"
             "Extract the holding, key facts, and citations as instructed."
         )

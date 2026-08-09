@@ -113,9 +113,11 @@ def search(
         from src.database import DB
         db = DB(_db_path())
         results = db.fts_search(q.strip(), limit=limit)
+        history_map = db.get_subsequent_history_summary_map([item["id"] for item in results], limit=3)
         for item in results:
-            item["subsequent_history"] = db.get_subsequent_history(item["id"], limit=3)
-            item["subsequent_history_count"] = len(db.get_subsequent_history(item["id"], limit=20))
+            summary = history_map.get(item["id"], {"count": 0, "items": []})
+            item["subsequent_history"] = summary["items"]
+            item["subsequent_history_count"] = summary["count"]
         auditlog.log_event(_cfg(), "api.search", actor=principal["actor"], role=principal["role"], details={"query": q.strip(), "limit": limit, "count": len(results)})
         return {"query": q, "count": len(results), "results": results}
     except Exception as exc:
@@ -128,15 +130,20 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
     try:
         from src.database import DB
         db = DB(_db_path())
-        with sqlite3.connect(_db_path()) as conn:
-            row = conn.execute(
-                """SELECT id, ref_no, virtual_folder, source_url, file_type,
-                          entities_json, citations_json, keywords_json,
-                          SUBSTR(text, 1, 8000) as preview, added_at,
-                          barcode, barcode_strategy, barcode_confidence, barcode_confirmed
-                   FROM documents WHERE id = ?""",
-                (doc_id,),
-            ).fetchone()
+        try:
+            with sqlite3.connect(_db_path()) as conn:
+                row = conn.execute(
+                    """SELECT id, ref_no, virtual_folder, source_url, file_type,
+                              entities_json, citations_json, keywords_json,
+                              SUBSTR(text, 1, 8000) as preview, added_at,
+                              barcode, barcode_strategy, barcode_confidence, barcode_confirmed
+                       FROM documents WHERE id = ?""",
+                    (doc_id,),
+                ).fetchone()
+            cited_cases = db.get_cross_references(doc_id)
+            subsequent_history = db.get_subsequent_history(doc_id, limit=20)
+        finally:
+            db.conn.close()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -164,8 +171,8 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         "barcode_strategy": row[11],
         "barcode_confidence": row[12],
         "barcode_confirmed": bool(row[13]) if row[13] is not None else False,
-        "cited_cases": db.get_cross_references(doc_id),
-        "subsequent_history": db.get_subsequent_history(doc_id, limit=20),
+        "cited_cases": cited_cases,
+        "subsequent_history": subsequent_history,
     }
     auditlog.log_event(_cfg(), "api.case", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "ref_no": row[1]})
     return result
@@ -198,22 +205,27 @@ def list_cases(
     try:
         from src.database import DB
         db = DB(_db_path())
-        with sqlite3.connect(_db_path()) as conn:
-            if folder:
-                rows = conn.execute(
-                    """SELECT id, ref_no, virtual_folder, source_url, added_at,
-                              barcode, barcode_confidence
-                       FROM documents WHERE virtual_folder LIKE ?
-                       ORDER BY added_at DESC LIMIT ? OFFSET ?""",
-                    (f"{folder}%", limit, offset),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT id, ref_no, virtual_folder, source_url, added_at,
-                              barcode, barcode_confidence
-                       FROM documents ORDER BY added_at DESC LIMIT ? OFFSET ?""",
-                    (limit, offset),
-                ).fetchall()
+        try:
+            history_map = {}
+            with sqlite3.connect(_db_path()) as conn:
+                if folder:
+                    rows = conn.execute(
+                        """SELECT id, ref_no, virtual_folder, source_url, added_at,
+                                  barcode, barcode_confidence
+                           FROM documents WHERE virtual_folder LIKE ?
+                           ORDER BY added_at DESC LIMIT ? OFFSET ?""",
+                        (f"{folder}%", limit, offset),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT id, ref_no, virtual_folder, source_url, added_at,
+                                  barcode, barcode_confidence
+                           FROM documents ORDER BY added_at DESC LIMIT ? OFFSET ?""",
+                        (limit, offset),
+                    ).fetchall()
+            history_map = db.get_subsequent_history_summary_map([r[0] for r in rows], limit=3)
+        finally:
+            db.conn.close()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -229,7 +241,7 @@ def list_cases(
                 "added_at": r[4],
                 "barcode": r[5],
                 "barcode_confidence": r[6],
-                "subsequent_history": db.get_subsequent_history(r[0], limit=3),
+                "subsequent_history": history_map.get(r[0], {}).get("items", []),
             }
             for r in rows
         ],

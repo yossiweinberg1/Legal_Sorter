@@ -80,8 +80,14 @@ def _upsert_env(values: dict[str, str]) -> None:
                 continue
             key, value = stripped.split("=", 1)
             existing_map[key.strip()] = value
+
+    def _render(value: str) -> str:
+        raw = str(value)
+        escaped = raw.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
     for key, value in values.items():
-        existing_map[key] = value
+        existing_map[key] = _render(value)
 
     emitted = set()
     output: list[str] = []

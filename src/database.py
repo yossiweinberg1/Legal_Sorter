@@ -611,10 +611,10 @@ class DB:
                 "INSERT OR IGNORE INTO cross_references (from_doc_id, to_doc_id, citation) VALUES (?, ?, ?)",
                 (from_doc_id, to_doc_id, citation),
             )
-        self.conn.execute(
-            "DELETE FROM cross_references WHERE from_doc_id=? AND citation=? AND (to_doc_id IS NULL OR to_doc_id!=?)",
-            (from_doc_id, citation, to_doc_id or ""),
-        )
+            self.conn.execute(
+                "DELETE FROM cross_references WHERE from_doc_id=? AND citation=? AND (to_doc_id IS NULL OR to_doc_id!=?)",
+                (from_doc_id, citation, to_doc_id),
+            )
         self.conn.commit()
 
     def get_cross_references(self, doc_id: str) -> list[dict]:
@@ -687,6 +687,57 @@ class DB:
             "negative_treatment_count": int(negative_count or 0),
             "items": items,
         }
+
+    def get_subsequent_history_summary_map(self, doc_ids: list[str], limit: int = 3) -> dict[str, dict]:
+        cleaned = [doc_id for doc_id in doc_ids if doc_id]
+        if not cleaned:
+            return {}
+        placeholders = ",".join("?" for _ in cleaned)
+        rows = self.conn.execute(
+            f"""SELECT cr.to_doc_id, cr.from_doc_id, d.ref_no, d.barcode, d.entities_json,
+                       cr.citation, cr.treatment, cr.context_snippet
+                FROM citation_relationships cr
+                JOIN documents d ON d.id = cr.from_doc_id
+                WHERE cr.to_doc_id IN ({placeholders})
+                ORDER BY cr.to_doc_id,
+                  CASE cr.treatment
+                    WHEN 'overruled' THEN 0
+                    WHEN 'criticized' THEN 1
+                    WHEN 'limited' THEN 2
+                    WHEN 'distinguished' THEN 3
+                    WHEN 'followed' THEN 4
+                    WHEN 'cited' THEN 5
+                    ELSE 6
+                  END,
+                  d.added_at DESC""",
+            cleaned,
+        ).fetchall()
+        summary = {
+            doc_id: {"count": 0, "negative_treatment_count": 0, "items": []}
+            for doc_id in cleaned
+        }
+        for row in rows:
+            target_doc_id = row[0]
+            bucket = summary.setdefault(
+                target_doc_id, {"count": 0, "negative_treatment_count": 0, "items": []}
+            )
+            bucket["count"] += 1
+            treatment = row[6] or "cited"
+            if treatment in {"overruled", "criticized", "limited"}:
+                bucket["negative_treatment_count"] += 1
+            if len(bucket["items"]) < limit:
+                bucket["items"].append(
+                    {
+                        "doc_id": row[1],
+                        "ref_no": row[2],
+                        "barcode": row[3],
+                        "year": self._derive_case_year(row[3], row[4]),
+                        "citation": row[5],
+                        "treatment": treatment,
+                        "context": row[7] or "",
+                    }
+                )
+        return summary
 
     def clear_citation_relationships_for_doc(self, doc_id: str) -> None:
         self.conn.execute("DELETE FROM citation_relationships WHERE from_doc_id = ?", (doc_id,))
