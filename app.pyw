@@ -1033,14 +1033,16 @@ class LegalSorterApp:
         # ── Main paned window ─────────────────────────────────────────
         self.paned_window = tk.PanedWindow(
             self.body_container, orient=tk.VERTICAL,
-            sashrelief=tk.FLAT, sashwidth=4,
+            sashrelief=tk.GROOVE, sashwidth=8, sashpad=4,
             bg=p["SEL_BG"]
         )
         self.paned_window.pack(fill=tk.BOTH, expand=True)
 
         # ── TOP PANE: Notebook with two tabs ─────────────────────────
         top_pane = ttk.Frame(self.paned_window, padding=4)
-        self.paned_window.add(top_pane, height=520)
+        # minsize ensures the top pane can never be dragged to zero,
+        # so the sash is always recoverable even after dragging to an edge.
+        self.paned_window.add(top_pane, height=520, minsize=200)
 
         self.main_notebook = ttk.Notebook(top_pane)
         self.main_notebook.pack(fill=tk.BOTH, expand=True)
@@ -1058,7 +1060,9 @@ class LegalSorterApp:
         # ── BOTTOM PANE: Engine log ───────────────────────────────────
         log_frame = ttk.LabelFrame(self.paned_window,
                                    text=" Live Engine Output ", padding=6)
-        self.paned_window.add(log_frame)
+        # minsize on the log pane prevents it from being collapsed completely,
+        # guaranteeing the sash stays reachable after dragging to the bottom edge.
+        self.paned_window.add(log_frame, minsize=80)
 
         # Log toolbar: autoscroll + copy buttons + status flash label
         log_toolbar = ttk.Frame(log_frame)
