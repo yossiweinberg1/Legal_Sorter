@@ -17,7 +17,7 @@ import yaml
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from src.database import LEGAL_SORTER_DB_PATH, connect_sqlite
+from src.database import connect_sqlite, resolve_db_path
 
 MODULE_DIR = Path(__file__).resolve().parent
 
@@ -75,7 +75,7 @@ def _load_from_db(cfg: dict, barcode_prefix: str | None = None) -> tuple[list[st
                         prefix are loaded.  Uses the B-tree index on barcode.
     """
     index_folder = cfg.get("index_folder", "")
-    db_path_str = str(Path(index_folder) / "legal_sorter.db") if index_folder else LEGAL_SORTER_DB_PATH
+    db_path_str = str(Path(index_folder) / "legal_sorter.db") if index_folder else resolve_db_path()
     db_path = Path(db_path_str)
 
     if not db_path.exists():

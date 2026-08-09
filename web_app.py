@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from src import config as cfgmod
 from src import audit as auditlog
-from src.database import LEGAL_SORTER_DB_PATH, connect_sqlite
+from src.database import connect_sqlite, resolve_db_path
 from src.icon_utils import logo_data_uri
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 
 
 def _db_path() -> str:
-    return LEGAL_SORTER_DB_PATH
+    return resolve_db_path()
 
 
 # ---------------------------------------------------------------------------

@@ -50,8 +50,8 @@ log = logging.getLogger("regen_barcodes")
 
 def _default_db_path() -> str:
     """Use the shared production database path."""
-    from src.database import LEGAL_SORTER_DB_PATH
-    return LEGAL_SORTER_DB_PATH
+    from src.database import resolve_db_path
+    return resolve_db_path()
 
 
 def _load_config() -> dict:

@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -11,7 +12,21 @@ SQLITE_RETRY_SLEEP_SECONDS = 0.15
 
 
 def resolve_db_path(db_path: str | None = None) -> str:
-    return db_path or LEGAL_SORTER_DB_PATH
+    if db_path:
+        return db_path
+    env_path = os.getenv("LEGAL_SORTER_DB_PATH", "").strip()
+    if env_path:
+        return env_path
+    try:
+        from . import config as cfgmod
+
+        cfg = cfgmod.load_config()
+        index_folder = str(cfg.get("index_folder", "")).strip()
+        if index_folder:
+            return str(Path(index_folder) / "legal_sorter.db")
+    except Exception:
+        pass
+    return LEGAL_SORTER_DB_PATH
 
 
 def connect_sqlite(db_path: str | None = None) -> sqlite3.Connection:
@@ -167,7 +182,7 @@ class DB:
         # timeout=30: wait up to 30 s for another writer to release the lock
         # before raising OperationalError, preventing crashes when run.py and
         # bulk_ingest.py both write to the same DB concurrently.
-        self.conn = connect_sqlite(db_path)
+        self.conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
         # WAL mode allows readers and writers to coexist without blocking each other.
         # busy_timeout mirrors the Python-level timeout inside SQLite itself.
         self.conn.execute("PRAGMA journal_mode=WAL;")

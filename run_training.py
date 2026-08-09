@@ -4,11 +4,11 @@ import sys
 # Ensure Python can resolve internal module paths inside src/llm/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "src", "llm")))
 from train import train_llm
-from src.database import LEGAL_SORTER_DB_PATH, connect_sqlite
+from src.database import connect_sqlite, resolve_db_path
 
 
 def _resolve_db_path() -> str:
-    return LEGAL_SORTER_DB_PATH
+    return resolve_db_path()
 
 
 def harvest_and_train():

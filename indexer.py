@@ -2,14 +2,14 @@ import json
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from src.database import LEGAL_SORTER_DB_PATH, connect_sqlite
+from src.database import connect_sqlite, resolve_db_path
 
 # 1. Load a fast, local embedding model (downloads automatically the first time)
 print("📥 Loading local tokenization model...")
 model = SentenceTransformer('all-MiniLM-L6-v2') 
 
 # 2. Connect to your database
-db_path = LEGAL_SORTER_DB_PATH
+db_path = resolve_db_path()
 conn = connect_sqlite(db_path)
 cursor = conn.cursor()
 
