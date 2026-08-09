@@ -124,7 +124,8 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
             row = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, file_type,
                           entities_json, citations_json, keywords_json,
-                          SUBSTR(text, 1, 8000) as preview, added_at
+                          SUBSTR(text, 1, 8000) as preview, added_at,
+                          barcode, barcode_strategy, barcode_confidence, barcode_confirmed
                    FROM documents WHERE id = ?""",
                 (doc_id,),
             ).fetchone()
@@ -151,6 +152,10 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         "keywords": _j(row[7]),
         "preview": (row[8] or "").replace("\n", " ").strip(),
         "added_at": row[9],
+        "barcode": row[10],
+        "barcode_strategy": row[11],
+        "barcode_confidence": row[12],
+        "barcode_confirmed": bool(row[13]) if row[13] is not None else False,
     }
     auditlog.log_event(_cfg(), "api.case", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "ref_no": row[1]})
     return result
@@ -168,14 +173,16 @@ def list_cases(
         with sqlite3.connect(_db_path()) as conn:
             if folder:
                 rows = conn.execute(
-                    """SELECT id, ref_no, virtual_folder, source_url, added_at
+                    """SELECT id, ref_no, virtual_folder, source_url, added_at,
+                              barcode, barcode_confidence
                        FROM documents WHERE virtual_folder LIKE ?
                        ORDER BY added_at DESC LIMIT ? OFFSET ?""",
                     (f"{folder}%", limit, offset),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """SELECT id, ref_no, virtual_folder, source_url, added_at
+                    """SELECT id, ref_no, virtual_folder, source_url, added_at,
+                              barcode, barcode_confidence
                        FROM documents ORDER BY added_at DESC LIMIT ? OFFSET ?""",
                     (limit, offset),
                 ).fetchall()
@@ -192,6 +199,8 @@ def list_cases(
                 "virtual_folder": r[2],
                 "source_url": r[3],
                 "added_at": r[4],
+                "barcode": r[5],
+                "barcode_confidence": r[6],
             }
             for r in rows
         ],
@@ -356,6 +365,76 @@ def ingest(body: IngestRequest, principal: dict = Depends(require_operator)):
     }
     auditlog.log_event(cfg, "api.ingest", actor=principal["actor"], role=principal["role"], details={"segments_submitted": len(segments), "stored": len(stored), "duplicates_skipped": len(duplicates), "label": body.label[:120]})
     return result
+
+
+@app.get("/api/barcode/{barcode}", tags=["Cases"])
+def get_case_by_barcode(barcode: str, principal: dict = Depends(require_reader)):
+    """Retrieve a document by its structured barcode ID (LS-CT-JR-SM-YR-SQ)."""
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        doc = db.get_document_by_barcode(barcode)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"No document found with barcode {barcode}")
+    auditlog.log_event(_cfg(), "api.barcode_lookup", actor=principal["actor"], role=principal["role"], details={"barcode": barcode})
+    return doc
+
+
+@app.post("/api/admin/regen_barcodes", tags=["Admin"])
+def admin_regen_barcodes(
+    force: bool = Query(default=False, description="Re-generate even confirmed barcodes"),
+    min_confidence: float = Query(default=0.85, ge=0.0, le=1.0, description="Re-generate barcodes below this confidence"),
+    principal: dict = Depends(require_admin),
+):
+    """Find and re-generate missing, failed, or low-confidence barcodes.
+
+    Runs synchronously (suitable for small archives).  For large archives
+    run ``regen_barcodes.py`` from the command line instead.
+    """
+    try:
+        from src.database import DB
+        from src import barcode as barcode_mod
+        cfg = _cfg()
+        db = DB(_db_path())
+        docs = db.find_docs_needing_barcode_regen(min_confidence=min_confidence, force=force)
+        barcode_cfg = cfg.get("barcode", {})
+        confirm_threshold = float(barcode_cfg.get("confirm_threshold", 0.85))
+        succeeded = 0
+        failed = 0
+        for doc in docs:
+            try:
+                import json as _json
+                entities = _json.loads(doc["entities_json"]) if doc["entities_json"] else {}
+                keywords = _json.loads(doc["keywords_json"]) if doc["keywords_json"] else []
+                bc, strategy, confidence = barcode_mod.assign_barcode(
+                    text=doc["text"] or "",
+                    entities=entities,
+                    citations=[],
+                    keywords=keywords,
+                    ref_no=doc["ref_no"] or "",
+                    cfg=cfg,
+                    virtual_folder=doc["virtual_folder"] or "",
+                )
+                db.set_barcode(
+                    doc["id"], bc, strategy=strategy,
+                    confidence=confidence, confirm_threshold=confirm_threshold,
+                )
+                succeeded += 1
+            except Exception:
+                failed += 1
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    auditlog.log_event(_cfg(), "admin.regen_barcodes", actor=principal["actor"], role=principal["role"],
+                       details={"force": force, "min_confidence": min_confidence,
+                                "candidates": len(docs), "succeeded": succeeded, "failed": failed})
+    return {
+        "candidates": len(docs),
+        "succeeded": succeeded,
+        "failed": failed,
+    }
 
 
 @app.get("/api/admin/jobs", tags=["Admin"])

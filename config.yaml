@@ -53,6 +53,7 @@ barcode:
   llm_model: ""          # e.g. "llama3" or "mistral" for a local Ollama model
   llm_base_url: ""       # e.g. "http://localhost:11434/v1"  (blank = use llm.base_url)
   llm_timeout_seconds: 20
+  confirm_threshold: 0.85  # auto-set barcode_confirmed=1 when confidence >= this
 
 auth:
   enabled: false

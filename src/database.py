@@ -162,10 +162,12 @@ class DB:
         # barcode:            the LS-CT-JR-SM-YR-SQ structured ID
         # barcode_strategy:   'rules' or 'llm' — which generator produced it
         # barcode_confirmed:  0 = auto-generated, 1 = manually reviewed/corrected
+        # barcode_confidence: float 0.0–1.0 classification confidence
         for col_def in [
             "barcode TEXT",
             "barcode_strategy TEXT DEFAULT 'rules'",
             "barcode_confirmed INTEGER DEFAULT 0",
+            "barcode_confidence REAL DEFAULT 0.0",
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE documents ADD COLUMN {col_def}")
@@ -290,13 +292,49 @@ class DB:
         return row[0] if row else None
 
 # ---------- structured barcode ----------
-    def set_barcode(self, doc_id: str, barcode: str, strategy: str = "rules") -> None:
-        """Persist the structured barcode ID for a document."""
+    def set_barcode(
+        self,
+        doc_id: str,
+        barcode: str,
+        strategy: str = "rules",
+        confidence: float = 0.0,
+        confirm_threshold: float = 0.85,
+    ) -> str:
+        """Persist the structured barcode ID for a document.
+
+        Collision handling: if *barcode* is already assigned to a *different*
+        document, a single-letter suffix (A–Z) is appended to the SQ segment
+        until a free slot is found.
+
+        Auto-confirmation: sets barcode_confirmed = 1 when confidence is at or
+        above *confirm_threshold* (default 0.85).
+
+        Returns the final barcode string that was stored (may differ from the
+        input when a collision suffix was appended).
+        """
+        try:
+            from . import barcode as barcode_mod
+        except ImportError:
+            import barcode as barcode_mod  # type: ignore[no-redef]
+
+        # Collect all barcodes already assigned to OTHER documents
+        rows = self.conn.execute(
+            "SELECT barcode FROM documents WHERE barcode IS NOT NULL AND id != ?",
+            (doc_id,),
+        ).fetchall()
+        existing: set[str] = {r[0] for r in rows if r[0]}
+        barcode = barcode_mod.resolve_collision(barcode, existing)
+
+        confirmed = 1 if confidence >= confirm_threshold else 0
         self.conn.execute(
-            "UPDATE documents SET barcode=?, barcode_strategy=? WHERE id=?",
-            (barcode, strategy, doc_id),
+            """UPDATE documents
+               SET barcode=?, barcode_strategy=?, barcode_confidence=?,
+                   barcode_confirmed=?
+               WHERE id=?""",
+            (barcode, strategy, confidence, confirmed, doc_id),
         )
         self.conn.commit()
+        return barcode
 
     def get_barcode(self, doc_id: str) -> str | None:
         """Return the barcode for a document, or None if not yet assigned."""
@@ -308,11 +346,11 @@ class DB:
     def confirm_barcode(self, doc_id: str, barcode: str) -> None:
         """Manually confirm (and optionally correct) a barcode.
 
-        Sets barcode_confirmed=1 so the record is excluded from future
-        automatic backfill or regeneration passes.
+        Sets barcode_confirmed=1 and barcode_confidence=1.0 so the record is
+        excluded from future automatic backfill or regeneration passes.
         """
         self.conn.execute(
-            "UPDATE documents SET barcode=?, barcode_confirmed=1 WHERE id=?",
+            "UPDATE documents SET barcode=?, barcode_confirmed=1, barcode_confidence=1.0 WHERE id=?",
             (barcode, doc_id),
         )
         self.conn.commit()
@@ -342,7 +380,7 @@ class DB:
             try:
                 entities = json.loads(entities_raw) if entities_raw else {}
                 keywords = json.loads(keywords_raw) if keywords_raw else []
-                barcode, strategy = barcode_mod.assign_barcode(
+                barcode, strategy, confidence = barcode_mod.assign_barcode(
                     text=text or "",
                     entities=entities,
                     citations=[],
@@ -351,15 +389,10 @@ class DB:
                     cfg={},  # rule-engine only during backfill (no cfg → no LLM)
                     virtual_folder=virtual_folder or "",
                 )
-                self.conn.execute(
-                    "UPDATE documents SET barcode=?, barcode_strategy=? WHERE id=?",
-                    (barcode, strategy, doc_id),
-                )
+                # Use set_barcode so collision handling and auto-confirm run
+                self.set_barcode(doc_id, barcode, strategy=strategy, confidence=confidence)
             except Exception:
                 pass  # never let a backfill error block startup
-
-        if rows:
-            self.conn.commit()
 
     def barcode_prefix_search(
         self,
@@ -372,14 +405,16 @@ class DB:
         regardless of archive size.
 
         Returns a list of dicts with keys:
-            id, ref_no, barcode, barcode_strategy, virtual_folder, source_url
+            id, ref_no, barcode, barcode_strategy, barcode_confidence,
+            virtual_folder, source_url
         """
         # Escape SQL LIKE special characters in the prefix
         like_safe = (
             prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
         rows = self.conn.execute(
-            """SELECT id, ref_no, barcode, barcode_strategy, virtual_folder, source_url
+            """SELECT id, ref_no, barcode, barcode_strategy, barcode_confidence,
+                      virtual_folder, source_url
                FROM documents
                WHERE barcode LIKE ? ESCAPE '\\'
                ORDER BY barcode
@@ -392,8 +427,9 @@ class DB:
                 "ref_no": r[1],
                 "barcode": r[2],
                 "barcode_strategy": r[3],
-                "virtual_folder": r[4],
-                "source_url": r[5],
+                "barcode_confidence": r[4],
+                "virtual_folder": r[5],
+                "source_url": r[6],
             }
             for r in rows
         ]
@@ -405,8 +441,8 @@ class DB:
         """
         row = self.conn.execute(
             """SELECT id, ref_no, barcode, barcode_strategy, barcode_confirmed,
-                      virtual_folder, source_url, file_type, keywords_json,
-                      citations_json, entities_json, added_at
+                      barcode_confidence, virtual_folder, source_url, file_type,
+                      keywords_json, citations_json, entities_json, added_at
                FROM documents WHERE barcode = ?""",
             (barcode,),
         ).fetchone()
@@ -418,14 +454,63 @@ class DB:
             "barcode": row[2],
             "barcode_strategy": row[3],
             "barcode_confirmed": bool(row[4]),
-            "virtual_folder": row[5],
-            "source_url": row[6],
-            "file_type": row[7],
-            "keywords": json.loads(row[8]) if row[8] else [],
-            "citations": json.loads(row[9]) if row[9] else [],
-            "entities": json.loads(row[10]) if row[10] else {},
-            "added_at": row[11],
+            "barcode_confidence": row[5],
+            "virtual_folder": row[6],
+            "source_url": row[7],
+            "file_type": row[8],
+            "keywords": json.loads(row[9]) if row[9] else [],
+            "citations": json.loads(row[10]) if row[10] else [],
+            "entities": json.loads(row[11]) if row[11] else {},
+            "added_at": row[12],
         }
+
+    def find_docs_needing_barcode_regen(
+        self,
+        min_confidence: float = 0.85,
+        force: bool = False,
+    ) -> list[dict]:
+        """Return documents that need barcode re-generation.
+
+        A document is selected when any of these conditions hold:
+          - barcode IS NULL (never generated)
+          - barcode_strategy = 'failed' (previous attempt errored)
+          - barcode_confidence < min_confidence (low-quality barcode)
+
+        When *force* is True, confirmed barcodes are also included.
+
+        Returns a list of dicts with keys:
+            id, ref_no, barcode, barcode_confidence, barcode_confirmed,
+            entities_json, keywords_json, virtual_folder, text
+        """
+        base = """
+            SELECT id, ref_no, barcode, barcode_confidence, barcode_confirmed,
+                   entities_json, keywords_json, virtual_folder, text
+            FROM documents
+            WHERE (
+                barcode IS NULL
+                OR barcode_strategy = 'failed'
+                OR (barcode_confidence IS NOT NULL AND barcode_confidence < ?)
+            )
+        """
+        params: list = [min_confidence]
+        if not force:
+            base += " AND (barcode_confirmed IS NULL OR barcode_confirmed = 0)"
+        base += " ORDER BY added_at"
+        rows = self.conn.execute(base, params).fetchall()
+        return [
+            {
+                "id": r[0],
+                "ref_no": r[1],
+                "barcode": r[2],
+                "barcode_confidence": r[3],
+                "barcode_confirmed": bool(r[4]),
+                "entities_json": r[5],
+                "keywords_json": r[6],
+                "virtual_folder": r[7],
+                "text": r[8],
+            }
+            for r in rows
+        ]
 
     # ---------- cross-referencing ----------
     def register_self_citation(self, citation: str, doc_id: str):
@@ -465,7 +550,8 @@ class DB:
         virtual table is not available (e.g. older SQLite build).
 
         Returns a list of dicts with keys:
-            id, ref_no, virtual_folder, source_url, snippet
+            id, ref_no, virtual_folder, source_url, barcode,
+            barcode_confidence, snippet
         """
         # Sanitise the query so special FTS5 operators don't crash it
         safe_query = query.replace('"', '""').strip()
@@ -473,6 +559,7 @@ class DB:
         try:
             rows = self.conn.execute(
                 """SELECT d.id, d.ref_no, d.virtual_folder, d.source_url,
+                          d.barcode, d.barcode_confidence,
                           snippet(documents_fts, 4, '<b>', '</b>', '…', 32) AS snip
                    FROM documents_fts
                    JOIN documents d ON d.id = documents_fts.id
@@ -488,6 +575,7 @@ class DB:
             like = f"%{like_safe}%"
             rows = self.conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url,
+                          barcode, barcode_confidence,
                           SUBSTR(text, 1, 300) AS snip
                    FROM documents
                    WHERE text LIKE ? ESCAPE '\\' OR keywords_json LIKE ? ESCAPE '\\'
@@ -502,7 +590,9 @@ class DB:
                 "ref_no": r[1],
                 "virtual_folder": r[2],
                 "source_url": r[3],
-                "snippet": (r[4] or "").replace("\n", " ")[:400],
+                "barcode": r[4],
+                "barcode_confidence": r[5],
+                "snippet": (r[6] or "").replace("\n", " ")[:400],
             }
             for r in rows
         ]

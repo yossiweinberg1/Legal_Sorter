@@ -106,6 +106,7 @@ class _CaseRow:
     source_url: str | None
     text: str
     barcode: str | None = None
+    barcode_confidence: float | None = None
     keywords: list[str] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
 
@@ -150,7 +151,7 @@ def _load_all(db_path: str, barcode_prefix: str | None = None) -> list[_CaseRow]
                     )
                 cur = conn.execute(
                     """SELECT id, ref_no, virtual_folder, source_url, text,
-                              keywords_json, citations_json, barcode
+                              keywords_json, citations_json, barcode, barcode_confidence
                        FROM documents
                        WHERE text IS NOT NULL AND text != ''
                          AND (content_source IS NULL OR content_source != 'snippet_only')
@@ -163,7 +164,7 @@ def _load_all(db_path: str, barcode_prefix: str | None = None) -> list[_CaseRow]
             else:
                 cur = conn.execute(
                     """SELECT id, ref_no, virtual_folder, source_url, text,
-                              keywords_json, citations_json, barcode
+                              keywords_json, citations_json, barcode, barcode_confidence
                        FROM documents
                        WHERE text IS NOT NULL AND text != ''
                          AND (content_source IS NULL OR content_source != 'snippet_only')
@@ -182,6 +183,7 @@ def _load_all(db_path: str, barcode_prefix: str | None = None) -> list[_CaseRow]
                     keywords=_safe_json(r[5], []),
                     citations=_safe_json(r[6], []),
                     barcode=r[7],
+                    barcode_confidence=r[8],
                 ))
     except Exception as exc:
         log.warning("DB load failed: %s", exc)
@@ -193,7 +195,7 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
         with sqlite3.connect(db_path) as conn:
             cur = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, text,
-                          keywords_json, citations_json, barcode
+                          keywords_json, citations_json, barcode, barcode_confidence
                    FROM documents WHERE id = ?
                      AND (content_source IS NULL OR content_source != 'snippet_only')
                      AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)""",
@@ -208,6 +210,7 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
                 keywords=_safe_json(r[5], []),
                 citations=_safe_json(r[6], []),
                 barcode=r[7],
+                barcode_confidence=r[8],
             )
     except Exception as exc:
         log.warning("DB load_one failed: %s", exc)
@@ -220,7 +223,7 @@ def _load_one_by_barcode(db_path: str, barcode: str) -> _CaseRow | None:
         with sqlite3.connect(db_path) as conn:
             cur = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, text,
-                          keywords_json, citations_json, barcode
+                          keywords_json, citations_json, barcode, barcode_confidence
                    FROM documents WHERE barcode = ?
                      AND (content_source IS NULL OR content_source != 'snippet_only')
                      AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)""",
@@ -235,6 +238,7 @@ def _load_one_by_barcode(db_path: str, barcode: str) -> _CaseRow | None:
                 keywords=_safe_json(r[5], []),
                 citations=_safe_json(r[6], []),
                 barcode=r[7],
+                barcode_confidence=r[8],
             )
     except Exception as exc:
         log.warning("DB load_one failed: %s", exc)
@@ -430,6 +434,7 @@ def query_cases(
             "doc_id": r.doc_id,
             "ref_no": r.ref_no,
             "barcode": r.barcode,
+            "barcode_confidence": r.barcode_confidence,
             "virtual_folder": r.virtual_folder,
             "source_url": r.source_url,
             "retrieval_score": _score(r, set(_tokenize(question))),

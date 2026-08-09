@@ -31,6 +31,38 @@ Generation strategies (controlled by config.barcode.strategy)
 The rule engine is authoritative for CT, JR, and YR; the LLM adds value for SM
 (subject matter) because legal topic classification benefits from reading the text.
 
+Confidence scores
+-----------------
+    assign_barcode() returns a 3-tuple (barcode, strategy, confidence).
+    Confidence is a float in [0.0, 1.0]:
+
+    Strategy            Confidence   Meaning
+    ------------------  -----------  ------------------------------------------
+    "llm"               0.90         LLM successfully classified all segments.
+    "rules"             0.75         Rule/gazetteer engine — deterministic but
+                                     limited to known patterns.
+    "llm_with_fallback" 0.65         LLM was attempted but failed; rules were
+                                     used as the fallback.
+
+    The database layer automatically sets barcode_confirmed = 1 for barcodes
+    whose confidence is at or above the configurable threshold
+    (barcode.confirm_threshold in config.yaml, default 0.85).  Low-confidence
+    barcodes remain unconfirmed so they can be reviewed or re-generated.
+
+Collision handling
+------------------
+    Because SQ is derived from the globally-unique LC-XXXXXX reference number,
+    true collisions are essentially impossible under normal operation.  However,
+    edge cases (NULL ref_no, manual edits, backfill) can produce SQ = "000000"
+    for multiple documents.  When a collision is detected the database layer
+    appends a single-letter suffix (A–Z) to the SQ segment:
+
+        LS-ST-TEX-FAM-2020-000000   (first document)
+        LS-ST-TEX-FAM-2020-000000A  (second document — collision resolved)
+        LS-ST-TEX-FAM-2020-000000B  (third document)
+
+    resolve_collision() implements this logic and is called by DB.set_barcode().
+
 Prefix patterns
 ---------------
     barcode_prefix() returns a raw SQL LIKE pattern (e.g. ``"LS-CA-CA9-%"``).
@@ -299,14 +331,20 @@ def _seq_from_ref_no(ref_no: str) -> str:
 # Rule-based barcode assembly
 # ---------------------------------------------------------------------------
 
+_CONFIDENCE_LLM = 0.90
+_CONFIDENCE_RULES = 0.75
+_CONFIDENCE_FALLBACK = 0.65  # LLM attempted but failed; rules used
+
+
 def _build_barcode_rules(
     text: str,
     entities: dict,
     keywords: list[str],
     ref_no: str,
     virtual_folder: str = "",
-) -> tuple[str, str]:
-    """Return (barcode, 'rules')."""
+    confidence: float = _CONFIDENCE_RULES,
+) -> tuple[str, str, float]:
+    """Return (barcode, 'rules', confidence)."""
     tl = text.lower()
     ct = _extract_ct(tl, virtual_folder)
     jr = _extract_jr(tl, entities)
@@ -314,7 +352,7 @@ def _build_barcode_rules(
     yr = _extract_yr(entities, tl)
     sq = _seq_from_ref_no(ref_no)
     barcode = f"LS-{ct}-{jr}-{sm}-{yr}-{sq}"
-    return barcode, "rules"
+    return barcode, "rules", confidence
 
 
 # ---------------------------------------------------------------------------
@@ -406,8 +444,8 @@ def _build_barcode_llm(
     ref_no: str,
     virtual_folder: str,
     cfg: dict,
-) -> tuple[str, str]:
-    """Return (barcode, 'llm'). Raises RuntimeError if LLM call fails."""
+) -> tuple[str, str, float]:
+    """Return (barcode, 'llm', confidence). Raises RuntimeError if LLM call fails."""
     result = _call_llm_classify(text, cfg)
     if result is None:
         raise RuntimeError("LLM classification returned no result")
@@ -418,7 +456,7 @@ def _build_barcode_llm(
     yr = yr_raw if re.fullmatch(r"(19|20)\d{2}", yr_raw) else "0000"
     sq = _seq_from_ref_no(ref_no)
     barcode = f"LS-{ct}-{jr}-{sm}-{yr}-{sq}"
-    return barcode, "llm"
+    return barcode, "llm", _CONFIDENCE_LLM
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +471,7 @@ def assign_barcode(
     ref_no: str,
     cfg: dict | None = None,
     virtual_folder: str = "",
-) -> tuple[str, str]:
+) -> tuple[str, str, float]:
     """Generate the structured barcode ID for a document.
 
     Args:
@@ -447,8 +485,11 @@ def assign_barcode(
         virtual_folder: The virtual folder string (used as auxiliary signal for CT).
 
     Returns:
-        (barcode, strategy) where strategy is "rules" or "llm".
-        e.g. ("LS-CA-CA9-CIV-2019-000042", "llm")
+        (barcode, strategy, confidence) where:
+          - barcode   is the LS-CT-JR-SM-YR-SQ string
+          - strategy  is "rules" or "llm"
+          - confidence is a float in [0.0, 1.0]
+        e.g. ("LS-CA-CA9-CIV-2019-000042", "llm", 0.9)
     """
     cfg = cfg or {}
     barcode_cfg = cfg.get("barcode", {})
@@ -465,7 +506,34 @@ def assign_barcode(
         return _build_barcode_llm(text, entities, keywords, ref_no, virtual_folder, cfg)
     except Exception as exc:
         log.debug("[BARCODE] LLM strategy failed (%s); using rule fallback.", exc)
-        return _build_barcode_rules(text, entities, keywords, ref_no, virtual_folder)
+        return _build_barcode_rules(
+            text, entities, keywords, ref_no, virtual_folder,
+            confidence=_CONFIDENCE_FALLBACK,
+        )
+
+
+def resolve_collision(barcode: str, existing: set[str]) -> str:
+    """Return a collision-free barcode by appending a letter suffix to the SQ segment.
+
+    If *barcode* is not in *existing* it is returned unchanged.  Otherwise the
+    SQ segment is extended with 'A', 'B', … 'Z' until a free slot is found.
+    Raises ``RuntimeError`` if all 26 suffixes are exhausted (astronomically
+    unlikely in practice).
+
+    Args:
+        barcode:  The candidate barcode string (e.g. ``"LS-ST-TEX-FAM-2020-000000"``).
+        existing: Set of barcodes already assigned to *other* documents.
+
+    Returns:
+        A barcode string that is not in *existing*.
+    """
+    if barcode not in existing:
+        return barcode
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        candidate = barcode + letter
+        if candidate not in existing:
+            return candidate
+    raise RuntimeError(f"[BARCODE] All 26 collision suffixes exhausted for {barcode}")
 
 
 def barcode_prefix(

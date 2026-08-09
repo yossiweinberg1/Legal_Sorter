@@ -485,7 +485,7 @@ def process_file(file_path: str, cfg: dict, db: DB):
     bc: str | None = None
     if barcode_cfg.get("enabled", True):
         try:
-            bc, bc_strategy = barcode_mod.assign_barcode(
+            bc, bc_strategy, bc_confidence = barcode_mod.assign_barcode(
                 text=text_content,
                 entities=tags.entities,
                 citations=tags.citations,
@@ -494,8 +494,15 @@ def process_file(file_path: str, cfg: dict, db: DB):
                 cfg=cfg,
                 virtual_folder=virtual_folder,
             )
-            db.set_barcode(doc_id, bc, strategy=bc_strategy)
-            log.info(f"  [B] Barcode ({bc_strategy}): {bc}")
+            confirm_threshold = float(
+                barcode_cfg.get("confirm_threshold", 0.85)
+            )
+            bc = db.set_barcode(
+                doc_id, bc, strategy=bc_strategy,
+                confidence=bc_confidence,
+                confirm_threshold=confirm_threshold,
+            )
+            log.info(f"  [B] Barcode ({bc_strategy}, conf={bc_confidence:.2f}): {bc}")
         except Exception as bc_err:
             log.warning(f"  [B] Barcode generation failed: {bc_err}")
 
