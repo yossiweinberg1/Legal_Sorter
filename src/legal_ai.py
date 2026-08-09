@@ -212,7 +212,6 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
                 citations=_safe_json(r[6], []),
                 barcode=r[7],
                 barcode_confidence=r[8],
-                subsequent_history=_load_subsequent_history(db_path, r[0], limit=5),
             )
     except Exception as exc:
         log.warning("DB load_one failed: %s", exc)
@@ -491,9 +490,10 @@ def query_cases(
             "source_url": r.source_url,
             "retrieval_score": _score(r, set(_tokenize(question))),
             "source_preview": (r.text or "")[:2000],
-            "source_text": r.text or "",
+            "source_text": (r.text or "")[:12000],
+            "source_text_truncated": len(r.text or "") > 12000,
             "citations": r.citations,
-            "subsequent_history": _load_subsequent_history(db_path, r.doc_id, limit=3),
+            "subsequent_history": history_map.get(r.doc_id, r.subsequent_history[:3]),
         }
         for r in top
     ]
@@ -523,6 +523,7 @@ def analyze_case(
 
     label = row.ref_no or row.doc_id[:12]
     bc_label = f"{label} / {row.barcode}" if row.barcode else label
+    history_items = _load_subsequent_history_map(db_path, [row.doc_id], limit=5).get(row.doc_id, [])
 
     system_msg = (
         "You are an expert legal analyst. "
@@ -533,7 +534,7 @@ def analyze_case(
     user_msg = (
         f"CASE: {bc_label}\n"
         f"FOLDER: {row.virtual_folder or 'Uncategorized'}\n\n"
-        f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(row.subsequent_history)}\n--- END SUBSEQUENT HISTORY ---\n\n"
+        f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(history_items)}\n--- END SUBSEQUENT HISTORY ---\n\n"
         f"--- FULL CASE TEXT ---\n{row.text}\n--- END ---\n\n"
         f"INSTRUCTION: {instruction}"
     )

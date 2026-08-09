@@ -127,26 +127,25 @@ def search(
 @app.get("/api/case/{doc_id}", tags=["Cases"])
 def get_case(doc_id: str, principal: dict = Depends(require_reader)):
     """Retrieve full metadata and text for a single indexed case."""
+    db = None
     try:
         from src.database import DB
         db = DB(_db_path())
-        try:
-            with sqlite3.connect(_db_path()) as conn:
-                row = conn.execute(
-                    """SELECT id, ref_no, virtual_folder, source_url, file_type,
-                              entities_json, citations_json, keywords_json,
-                              SUBSTR(text, 1, 8000) as preview, added_at,
-                              barcode, barcode_strategy, barcode_confidence, barcode_confirmed,
-                              text
-                       FROM documents WHERE id = ?""",
-                    (doc_id,),
-                ).fetchone()
-            cited_cases = db.get_cross_references(doc_id)
-            subsequent_history = db.get_subsequent_history(doc_id, limit=20)
-        finally:
-            db.conn.close()
+        row = db.conn.execute(
+            """SELECT id, ref_no, virtual_folder, source_url, file_type,
+                      entities_json, citations_json, keywords_json,
+                      added_at, barcode, barcode_strategy,
+                      barcode_confidence, barcode_confirmed, text
+               FROM documents WHERE id = ?""",
+            (doc_id,),
+        ).fetchone()
+        cited_cases = db.get_cross_references(doc_id)
+        subsequent_history = db.get_subsequent_history(doc_id, limit=20)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if db is not None:
+            db.conn.close()
 
     if not row:
         raise HTTPException(status_code=404, detail=f"Case {doc_id[:12]} not found.")
@@ -157,6 +156,8 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         except Exception:
             return []
 
+    full_text = row[13] or ""
+    full_text_cap = 12000
     result = {
         "id": row[0],
         "ref_no": row[1],
@@ -166,13 +167,14 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         "entities": _j(row[5]),
         "citations": _j(row[6]),
         "keywords": _j(row[7]),
-        "preview": (row[8] or "").replace("\n", " ").strip(),
-        "added_at": row[9],
-        "barcode": row[10],
-        "barcode_strategy": row[11],
-        "barcode_confidence": row[12],
-        "barcode_confirmed": bool(row[13]) if row[13] is not None else False,
-        "full_text": row[14] or "",
+        "preview": (full_text[:8000]).replace("\n", " ").strip(),
+        "added_at": row[8],
+        "barcode": row[9],
+        "barcode_strategy": row[10],
+        "barcode_confidence": row[11],
+        "barcode_confirmed": bool(row[12]) if row[12] is not None else False,
+        "full_text": full_text[:full_text_cap],
+        "full_text_truncated": len(full_text) > full_text_cap,
         "cited_cases": cited_cases,
         "subsequent_history": subsequent_history,
     }
@@ -186,12 +188,16 @@ def get_case_subsequent_history(
     limit: int = Query(default=20, le=100),
     principal: dict = Depends(require_reader),
 ):
+    db = None
     try:
         from src.database import DB
         db = DB(_db_path())
         items = db.get_subsequent_history(doc_id, limit=limit)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        if db is not None:
+            db.conn.close()
     auditlog.log_event(_cfg(), "api.case_subsequent_history", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "limit": limit, "count": len(items)})
     return {"doc_id": doc_id, "count": len(items), "results": items}
 
@@ -1060,7 +1066,6 @@ function resultCard(item) {
   const folder  = escapeHtml(item.virtual_folder || 'Uncategorized');
   const snippet = escapeHtml(item.snippet || '');
   const src     = safeSourceLink(item.source_url) || '<span class="muted">No source URL</span>';
-  const openId  = encodeURIComponent(item.id || '');
   const history = (item.subsequent_history || []).map(h =>
     `<li>${escapeHtml(h.ref_no || (h.doc_id || '').slice(0,12) || '?')} · ${escapeHtml(h.year || 'year?')} · ${escapeHtml(h.treatment || 'cited')}</li>`
   ).join('');
@@ -1071,7 +1076,7 @@ function resultCard(item) {
       <div class="snip">${snippet}</div>
       ${history ? `<div class="meta"><strong>Subsequent history</strong><ul style="margin:4px 0">${history}</ul></div>` : ''}
       <div class="meta">${src}</div>
-      ${item.id ? `<div style="margin-top:8px"><button class="btn" onclick="openCaseWorkspace('${openId}')">Open workspace</button></div>` : ''}
+      ${item.id ? `<div style="margin-top:8px"><button class="btn js-open-workspace" data-doc-id="${escapeHtml(item.id)}">Open workspace</button></div>` : ''}
     </div>`;
 }
 async function doSearch() {
@@ -1151,7 +1156,7 @@ async function loadRecentCases() {
             <div class="meta">📁 ${escapeHtml(c.virtual_folder||'Uncategorized')}</div>
             <div class="meta">${escapeHtml(c.added_at||'')}</div>
             ${((c.subsequent_history||[]).length) ? `<div class="meta"><strong>Subsequent history</strong>: ${(c.subsequent_history||[]).map(h => `${escapeHtml(h.ref_no || (h.doc_id||'').slice(0,12) || '?')} · ${escapeHtml(h.treatment || 'cited')}`).join('; ')}</div>` : ''}
-            ${c.id ? `<div style="margin-top:8px"><button class="btn" onclick="openCaseWorkspace('${encodeURIComponent(c.id)}')">Open workspace</button></div>` : ''}
+            ${c.id ? `<div style="margin-top:8px"><button class="btn js-open-workspace" data-doc-id="${escapeHtml(c.id)}">Open workspace</button></div>` : ''}
           </div>`).join('')
       : '<div class="muted">No cases found.</div>';
   } catch(_) { tgt.innerHTML = '<div class="danger">Failed to load case list.</div>'; }
@@ -1210,7 +1215,7 @@ async function loadCaseWorkspace(docIdValue = null) {
 }
 
 function openCaseWorkspace(encodedDocId) {
-  const docId = decodeURIComponent(encodedDocId || '');
+  const docId = String(encodedDocId || '').trim();
   const tabBtn = Array.from(document.querySelectorAll('.gh-tab')).find(b => b.textContent.includes('Case Workspace'));
   if (tabBtn) switchTab('workspace', tabBtn);
   loadCaseWorkspace(docId);
@@ -1277,6 +1282,12 @@ async function showAiSource(index) {
 document.getElementById('search-input').addEventListener('keydown', e => { if (e.key==='Enter') doSearch(); });
 document.getElementById('folder-filter') && document.getElementById('folder-filter').addEventListener('keydown', e => { if (e.key==='Enter') loadRecentCases(); });
 document.getElementById('workspace-doc-id') && document.getElementById('workspace-doc-id').addEventListener('keydown', e => { if (e.key==='Enter') loadCaseWorkspace(); });
+document.addEventListener('click', (event) => {
+  const btn = event.target.closest('.js-open-workspace');
+  if (!btn) return;
+  const docId = btn.getAttribute('data-doc-id') || '';
+  openCaseWorkspace(docId);
+});
 loadStats();
 </script>
 </body>
