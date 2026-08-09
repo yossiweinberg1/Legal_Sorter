@@ -72,7 +72,7 @@ def main() -> int:
         "--db",
         default=None,
         metavar="PATH",
-        help="Path to the SQLite database (default: LegalSorter production path).",
+        help="Path to the SQLite database (default: resolved from config.yaml or LEGAL_SORTER_DB_PATH).",
     )
     parser.add_argument(
         "--min-confidence",
