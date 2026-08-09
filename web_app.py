@@ -860,6 +860,45 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .workspace-list { margin: 0; padding-left: 18px; }
   .workspace-list li { margin: 4px 0; }
   .workspace-neg { color: var(--color-danger-fg); font-weight: 600; }
+  .workspace-subtabs {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .workspace-subtab {
+    background: var(--color-btn-bg);
+    border: 1px solid var(--color-btn-border);
+    color: var(--color-fg-muted);
+    padding: 6px 12px;
+    border-radius: var(--border-radius-small);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .workspace-subtab.active {
+    color: var(--color-fg-default);
+    border-color: var(--color-accent-fg);
+    box-shadow: inset 0 -2px 0 var(--color-accent-fg);
+  }
+  .workspace-tab-pane {
+    display: none;
+    margin-top: 10px;
+  }
+  .workspace-tab-pane.active {
+    display: block;
+  }
+  .workspace-panel {
+    background: var(--color-canvas-default);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--border-radius-small);
+    padding: 10px;
+    min-height: 220px;
+  }
+  .workspace-panel h4 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    color: var(--color-accent-fg);
+  }
 
   /* ── Misc ────────────────────────────────────────────── */
   .muted { color: var(--color-fg-muted); font-size: 12px; }
@@ -940,11 +979,23 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
           <button class="btn btn-primary" onclick="loadCaseWorkspace()">Open</button>
         </div>
         <div id="workspace-status" class="muted" style="margin-top:8px">Open a case from Search/Recent or enter a document id.</div>
-        <div class="workspace-grid">
-          <div class="workspace-pane"><h4>📄 Case Text</h4><div id="workspace-case" class="workspace-scroll muted">No case loaded.</div></div>
-          <div class="workspace-pane"><h4>📚 Citations</h4><div id="workspace-citations" class="workspace-scroll muted">No case loaded.</div></div>
-          <div class="workspace-pane"><h4>⚖️ Rulings</h4><div id="workspace-rulings" class="workspace-scroll muted">No case loaded.</div></div>
-          <div class="workspace-pane"><h4>🧭 Subsequent History</h4><div id="workspace-history" class="workspace-scroll muted">No case loaded.</div></div>
+        <div class="workspace-subtabs" id="workspace-subtabs">
+          <button class="workspace-subtab active" onclick="switchWorkspaceSubtab('case', this)">📄 Case Text</button>
+          <button class="workspace-subtab" onclick="switchWorkspaceSubtab('citations', this)">📚 Citations</button>
+          <button class="workspace-subtab" onclick="switchWorkspaceSubtab('rulings', this)">⚖️ Rulings</button>
+          <button class="workspace-subtab" onclick="switchWorkspaceSubtab('history', this)">🧭 Overturned / History</button>
+        </div>
+        <div id="workspace-pane-case" class="workspace-tab-pane active">
+          <div class="workspace-panel"><h4>📄 Case Text</h4><div id="workspace-case" class="workspace-scroll muted">No case loaded.</div></div>
+        </div>
+        <div id="workspace-pane-citations" class="workspace-tab-pane">
+          <div class="workspace-panel"><h4>📚 Citations</h4><div id="workspace-citations" class="workspace-scroll muted">No case loaded.</div></div>
+        </div>
+        <div id="workspace-pane-rulings" class="workspace-tab-pane">
+          <div class="workspace-panel"><h4>⚖️ Rulings</h4><div id="workspace-rulings" class="workspace-scroll muted">No case loaded.</div></div>
+        </div>
+        <div id="workspace-pane-history" class="workspace-tab-pane">
+          <div class="workspace-panel"><h4>🧭 Overturned / History</h4><div id="workspace-history" class="workspace-scroll muted">No case loaded.</div></div>
         </div>
       </div>
     </div>
@@ -1009,10 +1060,19 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
           <button id="ask-btn" class="btn btn-primary" onclick="doAsk()">Ask AI</button>
         </div>
         <div id="ask-results"></div>
-        <div class="workspace-grid">
-          <div class="workspace-pane"><h4>🧠 LLM Answer</h4><div id="ai-answer" class="workspace-scroll muted">No answer yet.</div></div>
-          <div class="workspace-pane"><h4>🔗 Sources</h4><div id="ai-sources" class="workspace-scroll muted">No sources yet.</div></div>
-          <div class="workspace-pane" style="grid-column: 1 / -1;"><h4>📖 Full Source Content</h4><div id="ai-source-full" class="workspace-scroll muted">Select a source after asking a question.</div></div>
+        <div class="workspace-subtabs" id="ai-subtabs">
+          <button class="workspace-subtab active" onclick="switchAiSubtab('answer', this)">🧠 LLM Answer</button>
+          <button class="workspace-subtab" onclick="switchAiSubtab('sources', this)">🔗 Sources</button>
+          <button class="workspace-subtab" onclick="switchAiSubtab('full', this)">📖 Full Source Content</button>
+        </div>
+        <div id="ai-pane-answer" class="workspace-tab-pane active">
+          <div class="workspace-panel"><h4>🧠 LLM Answer</h4><div id="ai-answer" class="workspace-scroll muted">No answer yet.</div></div>
+        </div>
+        <div id="ai-pane-sources" class="workspace-tab-pane">
+          <div class="workspace-panel"><h4>🔗 Sources</h4><div id="ai-sources" class="workspace-scroll muted">No sources yet.</div></div>
+        </div>
+        <div id="ai-pane-full" class="workspace-tab-pane">
+          <div class="workspace-panel"><h4>📖 Full Source Content</h4><div id="ai-source-full" class="workspace-scroll muted">Select a source after asking a question.</div></div>
         </div>
       </div>
     </div>
@@ -1042,6 +1102,20 @@ function switchTab(name, btn) {
   document.getElementById('panel-' + name).classList.add('active');
   btn.classList.add('active');
   if (name === 'recent') loadRecentCases();
+}
+
+function switchWorkspaceSubtab(name, btn) {
+  document.querySelectorAll('#workspace-subtabs .workspace-subtab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('[id^="workspace-pane-"]').forEach(p => p.classList.remove('active'));
+  document.getElementById('workspace-pane-' + name).classList.add('active');
+  if (btn) btn.classList.add('active');
+}
+
+function switchAiSubtab(name, btn) {
+  document.querySelectorAll('#ai-subtabs .workspace-subtab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('[id^="ai-pane-"]').forEach(p => p.classList.remove('active'));
+  document.getElementById('ai-pane-' + name).classList.add('active');
+  if (btn) btn.classList.add('active');
 }
 
 /* ── Stats ───────────────────────────────────────────── */
@@ -1218,6 +1292,8 @@ function openCaseWorkspace(encodedDocId) {
   const docId = String(encodedDocId || '').trim();
   const tabBtn = Array.from(document.querySelectorAll('.gh-tab')).find(b => b.textContent.includes('Case Workspace'));
   if (tabBtn) switchTab('workspace', tabBtn);
+  const firstWorkspaceSubtab = document.querySelector('#workspace-subtabs .workspace-subtab');
+  switchWorkspaceSubtab('case', firstWorkspaceSubtab);
   loadCaseWorkspace(docId);
 }
 
@@ -1249,6 +1325,8 @@ async function doAsk() {
     window.__aiSources = Array.isArray(d.sources) ? d.sources : [];
     sourcesPane.innerHTML = sources ? `<ul class="workspace-list">${sources}</ul>` : '<span class="muted">No sources returned.</span>';
     if (window.__aiSources.length) {
+      const sourcesTab = document.querySelector('#ai-subtabs .workspace-subtab:nth-child(2)');
+      switchAiSubtab('sources', sourcesTab);
       showAiSource(0);
     } else {
       fullPane.textContent = 'No source content available.';
