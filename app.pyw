@@ -74,13 +74,24 @@ _safe_console_print("[Bootloader] Source paths appended to environment.")
 try:
     _safe_console_print("[Bootloader] Safe-loading PyTorch core...")
     start_t = time.time()
-    import torch
-    _safe_console_print(f"[Bootloader] PyTorch loaded successfully in {time.time() - start_t:.2f}s.")
-    
+    try:
+        import torch
+        _safe_console_print(f"[Bootloader] PyTorch loaded successfully in {time.time() - start_t:.2f}s.")
+    except ImportError as e:
+        # torch may not be installed yet (e.g. first run before setup wizard finishes,
+        # or an unsupported platform).  The LLM training/inference features will be
+        # disabled but the rest of the application starts normally.
+        _safe_console_print(
+            f"[Bootloader ⚠️  WARNING] PyTorch not available — LLM features disabled. ({e})"
+        )
+        raise  # re-raise so the outer except skips the `import train` block
+
     _safe_console_print("[Bootloader] Safe-loading training dependencies...")
     start_t = time.time()
     import train
     _safe_console_print(f"[Bootloader] Training matrix loaded successfully in {time.time() - start_t:.2f}s.")
+except ImportError:
+    pass  # already logged above; skip dependent imports that require torch
 except Exception as e:
     _safe_console_print(f"[Bootloader ❌ ERROR] Pre-import sequence failed: {e}")
     _safe_traceback_print()

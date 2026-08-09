@@ -7,7 +7,9 @@ scikit-learn>=1.4.0
 joblib>=1.4.2
 pyyaml>=6.0
 requests>=2.31.0
-torch>=2.2.0
+# torch is installed separately by the setup wizard to handle ARM64 Windows
+# (no official PyPI wheel exists for torch on Windows/ARM64).
+# On all other platforms it falls back to: torch>=2.2.0
 tokenizers>=0.15.0
 pywin32>=306 ; platform_system == "Windows"
 watchdog>=4.0.0

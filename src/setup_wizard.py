@@ -109,6 +109,40 @@ def _upsert_env(values: dict[str, str]) -> None:
     ENV_FILE.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
 
 
+def _is_arm64_windows() -> bool:
+    """Return True when running on a Windows ARM64 machine."""
+    import platform
+    return sys.platform == "win32" and platform.machine().upper() in ("ARM64", "AARCH64")
+
+
+def _install_torch(py: str, log_emit) -> None:
+    """Install PyTorch with the correct source for the current platform.
+
+    On Windows ARM64 there are no official PyPI wheels for torch, so we use
+    the CPU-only build from PyTorch's own index.  On every other platform we
+    simply install from PyPI as usual.
+    """
+    if _is_arm64_windows():
+        log_emit(
+            "Detected Windows ARM64 — installing PyTorch CPU-only build "
+            "from the PyTorch project index (PyPI has no ARM64 wheel)..."
+        )
+        subprocess.check_call(
+            [
+                py, "-m", "pip", "install",
+                "torch>=2.2.0",
+                "--index-url", "https://download.pytorch.org/whl/cpu",
+            ],
+            cwd=str(ROOT),
+        )
+    else:
+        log_emit("Installing PyTorch from PyPI...")
+        subprocess.check_call(
+            [py, "-m", "pip", "install", "torch>=2.2.0"],
+            cwd=str(ROOT),
+        )
+
+
 def ensure_virtualenv(log=None) -> str:
     def emit(msg: str) -> None:
         if log:
@@ -123,6 +157,7 @@ def ensure_virtualenv(log=None) -> str:
     emit("Installing/updating dependencies...")
     subprocess.check_call([py, "-m", "pip", "install", "--upgrade", "pip"], cwd=str(ROOT))
     subprocess.check_call([py, "-m", "pip", "install", "-r", "requirements.txt"], cwd=str(ROOT))
+    _install_torch(py, emit)
     return py
 
 
