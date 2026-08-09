@@ -111,7 +111,12 @@ def main() -> None:
     # its default icon and the real one will be embedded on the next build after
     # the user has run the app once (which generates legal_sorter.ico).
     if not (ROOT / "legal_sorter.ico").exists():
-        cmd = [c for c in cmd if c not in ("--icon", "legal_sorter.ico")]
+        try:
+            idx = cmd.index("--icon")
+            # Remove both --icon and its value (the next element).
+            del cmd[idx:idx + 2]
+        except ValueError:
+            pass  # flag was not present; nothing to do
 
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
