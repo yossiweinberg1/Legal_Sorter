@@ -415,7 +415,12 @@ class LegalSorterApp:
             win = tk.Toplevel(self.root)
             win.geometry("980x760")
             win.minsize(700, 520)
-            state = {"win": win, "tab_text_widgets": {}, "tab_contents": {}, "tab_ids_to_keys": {}}
+            state = {
+                "win": win,
+                "tab_text_widgets": {},
+                "tab_contents": {},
+                "tab_frames": {},
+            }
             self._tabbed_viewers[viewer_id] = state
 
             header = ttk.Frame(win, padding=(10, 6))
@@ -445,7 +450,10 @@ class LegalSorterApp:
 
             def _active_tab_key() -> str | None:
                 tab_id = notebook.select()
-                return state["tab_ids_to_keys"].get(tab_id)
+                for key, frame in state["tab_frames"].items():
+                    if str(frame) == tab_id:
+                        return key
+                return None
 
             def _active_text_widget():
                 key = _active_tab_key()
@@ -513,13 +521,15 @@ class LegalSorterApp:
         existing_keys = set(state["tab_text_widgets"].keys())
         tab_keys = [k for k, _, _ in tabs]
         for tab_key in existing_keys - set(tab_keys):
-            widget = state["tab_text_widgets"].pop(tab_key)
-            parent = widget.master
+            state["tab_text_widgets"].pop(tab_key, None)
+            parent = state["tab_frames"].pop(tab_key, None)
             try:
-                state["notebook"].forget(parent)
+                if parent is not None:
+                    state["notebook"].forget(parent)
             except Exception:
                 pass
-            parent.destroy()
+            if parent is not None:
+                parent.destroy()
             state["tab_contents"].pop(tab_key, None)
 
         for tab_key, tab_label, tab_content in tabs:
@@ -548,8 +558,7 @@ class LegalSorterApp:
 
                 state["notebook"].add(tab_frame, text=tab_label)
                 state["tab_text_widgets"][tab_key] = text_widget
-                tab_id = state["notebook"].tabs()[-1]
-                state["tab_ids_to_keys"][tab_id] = tab_key
+                state["tab_frames"][tab_key] = tab_frame
 
             text_widget.config(state=tk.NORMAL)
             text_widget.delete("1.0", tk.END)

@@ -980,10 +980,10 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
         <div id="workspace-status" class="muted" style="margin-top:8px">Open a case from Search/Recent or enter a document id.</div>
         <div class="workspace-subtabs" id="workspace-subtabs">
-          <button class="workspace-subtab active" onclick="switchWorkspaceSubtab('case', this)">📄 Case Text</button>
-          <button class="workspace-subtab" onclick="switchWorkspaceSubtab('citations', this)">📚 Citations</button>
-          <button class="workspace-subtab" onclick="switchWorkspaceSubtab('rulings', this)">⚖️ Rulings</button>
-          <button class="workspace-subtab" onclick="switchWorkspaceSubtab('history', this)">🧭 Overturned / History</button>
+          <button class="workspace-subtab active" data-tab="case" onclick="switchWorkspaceSubtab('case', this)">📄 Case Text</button>
+          <button class="workspace-subtab" data-tab="citations" onclick="switchWorkspaceSubtab('citations', this)">📚 Citations</button>
+          <button class="workspace-subtab" data-tab="rulings" onclick="switchWorkspaceSubtab('rulings', this)">⚖️ Rulings</button>
+          <button class="workspace-subtab" data-tab="history" onclick="switchWorkspaceSubtab('history', this)">🧭 Overturned / History</button>
         </div>
         <div id="workspace-pane-case" class="workspace-tab-pane active">
           <div class="workspace-panel"><h4>📄 Case Text</h4><div id="workspace-case" class="workspace-scroll muted">No case loaded.</div></div>
@@ -1061,9 +1061,9 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
         <div id="ask-results"></div>
         <div class="workspace-subtabs" id="ai-subtabs">
-          <button class="workspace-subtab active" onclick="switchAiSubtab('answer', this)">🧠 LLM Answer</button>
-          <button class="workspace-subtab" onclick="switchAiSubtab('sources', this)">🔗 Sources</button>
-          <button class="workspace-subtab" onclick="switchAiSubtab('full', this)">📖 Full Source Content</button>
+          <button class="workspace-subtab active" data-tab="answer" onclick="switchAiSubtab('answer', this)">🧠 LLM Answer</button>
+          <button class="workspace-subtab" data-tab="sources" onclick="switchAiSubtab('sources', this)">🔗 Sources</button>
+          <button class="workspace-subtab" data-tab="full" onclick="switchAiSubtab('full', this)">📖 Full Source Content</button>
         </div>
         <div id="ai-pane-answer" class="workspace-tab-pane active">
           <div class="workspace-panel"><h4>🧠 LLM Answer</h4><div id="ai-answer" class="workspace-scroll muted">No answer yet.</div></div>
@@ -1325,7 +1325,7 @@ async function doAsk() {
     window.__aiSources = Array.isArray(d.sources) ? d.sources : [];
     sourcesPane.innerHTML = sources ? `<ul class="workspace-list">${sources}</ul>` : '<span class="muted">No sources returned.</span>';
     if (window.__aiSources.length) {
-      const sourcesTab = document.querySelector('#ai-subtabs .workspace-subtab:nth-child(2)');
+      const sourcesTab = document.querySelector('#ai-subtabs .workspace-subtab[data-tab="sources"]');
       switchAiSubtab('sources', sourcesTab);
       showAiSource(0);
     } else {
