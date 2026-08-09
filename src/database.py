@@ -123,9 +123,14 @@ END;
 class DB:
     def __init__(self, db_path: str):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
-        # WAL mode allows readers and writers to coexist without blocking each other
+        # timeout=30: wait up to 30 s for another writer to release the lock
+        # before raising OperationalError, preventing crashes when run.py and
+        # bulk_ingest.py both write to the same DB concurrently.
+        self.conn = sqlite3.connect(db_path, timeout=30)
+        # WAL mode allows readers and writers to coexist without blocking each other.
+        # busy_timeout mirrors the Python-level timeout inside SQLite itself.
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
         self.conn.executescript(SCHEMA)

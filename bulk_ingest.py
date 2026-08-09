@@ -15,7 +15,8 @@ import bz2
 import sys
 import csv
 import re
-from bs4 import BeautifulSoup
+import warnings
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 # Increase the CSV field size limit to 25 Megabytes to handle massive multi-page opinions
 csv.field_size_limit(25000000)
@@ -39,7 +40,12 @@ NS = {'s3': 'http://s3.amazonaws.com/doc/2006-03-01/'}
 def _html_to_text(html: str) -> str:
     """Strip HTML tags and return clean plain text, preserving paragraph breaks."""
     try:
-        soup = BeautifulSoup(html, "lxml")
+        # Some CourtListener payloads are XML fragments; suppress the
+        # XMLParsedAsHTMLWarning that bs4 emits when the lxml HTML parser
+        # encounters them, without affecting warnings elsewhere in the process.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+            soup = BeautifulSoup(html, "lxml")
         for tag in soup(["script", "style", "nav", "header", "footer"]):
             tag.decompose()
         text = soup.get_text(separator="\n")
