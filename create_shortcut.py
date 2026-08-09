@@ -26,7 +26,7 @@ try:
     sys.path.insert(0, str(APP_ROOT))
     from src.icon_utils import ensure_icon as _ensure_icon_fn
     def _ensure_icon() -> str:
-        return _ensure_icon_fn(ICON_PATH)
+        return _ensure_icon_fn(ICON_PATH, force=False)
 except Exception:
     def _ensure_icon() -> str:  # type: ignore[misc]
         return str(ICON_PATH)  # icon may not exist; shortcut will show default

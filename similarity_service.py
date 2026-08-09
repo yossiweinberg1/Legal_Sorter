@@ -8,7 +8,6 @@ Cache files are stored next to this module so they survive restarts.
 """
 import os
 import re
-import sqlite3
 import threading
 from pathlib import Path
 
@@ -17,6 +16,8 @@ import numpy as np
 import yaml
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+from src.database import connect_sqlite, resolve_db_path
 
 MODULE_DIR = Path(__file__).resolve().parent
 
@@ -74,13 +75,14 @@ def _load_from_db(cfg: dict, barcode_prefix: str | None = None) -> tuple[list[st
                         prefix are loaded.  Uses the B-tree index on barcode.
     """
     index_folder = cfg.get("index_folder", "")
-    db_path = Path(index_folder) / "legal_sorter.db" if index_folder else None
+    db_path_str = str(Path(index_folder) / "legal_sorter.db") if index_folder else resolve_db_path()
+    db_path = Path(db_path_str)
 
-    if not db_path or not db_path.exists():
+    if not db_path.exists():
         return [], []
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
+        with connect_sqlite(db_path_str) as conn:
             if barcode_prefix is not None:
                 if "%" in barcode_prefix:
                     # Raw wildcard pattern from barcode_prefix() — use as-is

@@ -49,14 +49,9 @@ log = logging.getLogger("regen_barcodes")
 
 
 def _default_db_path() -> str:
-    """Mirror the logic in web_app.py / config.py to locate the database."""
-    try:
-        from src.config import load_config
-        cfg = load_config()
-        index_folder = cfg.get("index_folder", ".")
-        return str(Path(index_folder) / "legal_sorter.db")
-    except Exception:
-        return "legal_sorter.db"
+    """Use the shared production database path."""
+    from src.database import resolve_db_path
+    return resolve_db_path()
 
 
 def _load_config() -> dict:
@@ -77,7 +72,7 @@ def main() -> int:
         "--db",
         default=None,
         metavar="PATH",
-        help="Path to the SQLite database (default: from config.yaml).",
+        help="Path to the SQLite database (default: resolved from config.yaml or LEGAL_SORTER_DB_PATH).",
     )
     parser.add_argument(
         "--min-confidence",

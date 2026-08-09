@@ -17,7 +17,7 @@ from similarity_service import build_and_cache_index, get_similar_cases
 from src.legal_fetch import CourtListenerClient
 from src.study_assistant import generate_study_response, NO_DOCS_SENTINEL, NO_MATCH_SENTINEL
 from src.legal_ai import query_cases, analyze_case, semantic_search
-from src.database import DB
+from src.database import DB, connect_sqlite, safe_connection_commit, safe_connection_execute
 from src.setup_wizard import is_first_run, run_gui_wizard
 
 # Import the window class from the new file you just created
@@ -101,17 +101,13 @@ _safe_console_print("[Bootloader] All systems green. Initializing Tkinter window
 # =====================================================================
 # Icon helpers
 # =====================================================================
-from src.icon_utils import ensure_icon as _ensure_icon, ensure_logo_png as _ensure_logo_png
+from src.icon_utils import (
+    ensure_icon_reference_dir as _ensure_icon_reference_dir,
+    logo_png_base64 as _logo_png_base64,
+)
 
 _ICON_PATH = Path(__file__).resolve().parent / "legal_sorter.ico"
 _LOGO_PNG_PATH = Path(__file__).resolve().parent / "legal_sorter.png"
-
-# Pre-generate the icon assets once so the shortcut creator can also reference them
-try:
-    _ensure_icon(_ICON_PATH)
-    _ensure_logo_png(_LOGO_PNG_PATH, size=256)
-except Exception:
-    pass
 
 # =====================================================================
 class LegalSorterApp:
@@ -125,6 +121,7 @@ class LegalSorterApp:
         self._temp_files = [] # track temp files created by repull so we can clean them up on exit
         self.ai_stop_requested = False
         self.log_autoscroll_var = tk.BooleanVar(value=True)
+        self.icon_reference_dir = None
 
         # Window Configurations
         self.root.title(" LegalSorter Control Center")
@@ -132,6 +129,10 @@ class LegalSorterApp:
         self.root.minsize(1120, 740)
         self._app_icon = None
         self._tabbed_viewers = {}
+        try:
+            self.icon_reference_dir = _ensure_icon_reference_dir()
+        except Exception:
+            self.icon_reference_dir = None
         self.apply_branding()
         
         self.stop_event = threading.Event()
@@ -153,19 +154,19 @@ class LegalSorterApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def apply_branding(self):
-        """Apply built-in branding: proper .ico on Windows, PhotoImage elsewhere."""
+        """Apply built-in branding without regenerating on-disk icon assets."""
         # ── Windows: use the .ico file for title-bar AND taskbar ──────────────
-        if sys.platform == "win32":
+        if sys.platform == "win32" and _ICON_PATH.exists():
             try:
-                self.root.wm_iconbitmap(_ensure_icon(_ICON_PATH))
+                self.root.wm_iconbitmap(str(_ICON_PATH))
                 self._app_icon = None
                 return
             except Exception:
                 pass  # fall through to PhotoImage fallback
 
-        # ── Other platforms: use the shared PNG logo ──────────────────────────
+        # ── Fallback: use the shared PNG logo from memory (no file writes) ───
         try:
-            self._app_icon = tk.PhotoImage(file=_ensure_logo_png(_LOGO_PNG_PATH, size=256))
+            self._app_icon = tk.PhotoImage(data=_logo_png_base64(256))
             self.root.iconphoto(True, self._app_icon)
         except Exception:
             self._app_icon = None
@@ -572,7 +573,7 @@ class LegalSorterApp:
     def _load_case_workspace_payload(self, doc_id: str) -> dict | None:
         if not self.db_path or not os.path.exists(self.db_path):
             return None
-        with sqlite3.connect(self.db_path) as conn:
+        with connect_sqlite(self.db_path) as conn:
             row = conn.execute(
                 """SELECT id, ref_no, source_url, text, entities_json, citations_json
                    FROM documents WHERE id = ?""",
@@ -693,7 +694,7 @@ class LegalSorterApp:
             return False, "Database path not configured."
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_sqlite(self.db_path)
             cur = conn.cursor()
             cur.execute("SELECT source_url, ref_no, text FROM documents WHERE id=?", (doc_id,))
             row = cur.fetchone()
@@ -1631,7 +1632,7 @@ class LegalSorterApp:
         try:
             # 1. Query text AND labels from the database
             self.log_to_live_engine("📂 Querying local database records and labels...")
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_sqlite(self.db_path)
             cursor = conn.cursor()
             
             # ⚠️ NOTE: If your category column is named something else, change 'category_id' below!
@@ -2048,11 +2049,11 @@ class LegalSorterApp:
             return
 
         try:
-            link = sqlite3.connect(self.db_path)
+            link = connect_sqlite(self.db_path)
             cursor = link.cursor()
 
             # PROACTIVE QUEUE DUPLICATION DETECTOR ENGINE
-            cursor.execute("""
+            safe_connection_execute(link, """
                 UPDATE priority_queue 
                 SET status='fetched' 
                 WHERE status='pending' AND (
@@ -2061,7 +2062,7 @@ class LegalSorterApp:
                 )
             """)
             if link.total_changes > 0:
-                link.commit()
+                safe_connection_commit(link)
 
             cursor.execute("SELECT COUNT(*) FROM documents")
             total_indexed = cursor.fetchone()[0]
@@ -2089,7 +2090,7 @@ class LegalSorterApp:
                 self.refresh_case_tree()
                 self.last_total_indexed = total_indexed
 
-                link2 = sqlite3.connect(self.db_path)
+                link2 = connect_sqlite(self.db_path)
                 latest = link2.execute(
                     "SELECT id FROM documents ORDER BY added_at DESC LIMIT 1"
                 ).fetchone()
@@ -2108,13 +2109,13 @@ class LegalSorterApp:
 
         # 🛡️ FAILSAFE AUTO-MIGRATION GATEWAY
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_sqlite(self.db_path)
             for column_name, column_type in [("is_bookmarked", "INTEGER DEFAULT 0"), ("user_folder", "TEXT")]:
                 try:
-                    conn.execute(f"ALTER TABLE documents ADD COLUMN {column_name} {column_type}")
+                    safe_connection_execute(conn, f"ALTER TABLE documents ADD COLUMN {column_name} {column_type}")
                 except sqlite3.OperationalError:
                     pass
-            conn.commit()
+            safe_connection_commit(conn)
             conn.close()
         except Exception as migration_err:
             print(f"[Migration Failsafe] Encountered configuration issue: {migration_err}")
@@ -2124,7 +2125,7 @@ class LegalSorterApp:
             self.case_tree.delete(item)
 
         try:
-            link = sqlite3.connect(self.db_path)
+            link = connect_sqlite(self.db_path)
             cursor = link.cursor()
             search_query = self.search_var.get().strip()
 
@@ -2259,7 +2260,7 @@ class LegalSorterApp:
         if not os.path.exists(self.db_path):
             return
         try:
-            link = sqlite3.connect(self.db_path)
+            link = connect_sqlite(self.db_path)
             cursor = link.cursor()
             cursor.execute("""
                 SELECT id, virtual_folder, entities_json, citations_json, keywords_json, text, source_url 
@@ -2566,7 +2567,7 @@ class LegalSorterApp:
                     messagebox.showerror("Database Viewer", "Database path not found.")
                     return
 
-                conn = sqlite3.connect(viewer_db_path)
+                conn = connect_sqlite(viewer_db_path)
                 term = filter_var.get().strip()
 
                 base_select = "SELECT id, ref_no, virtual_folder, source_url, source_path, added_at FROM documents"
@@ -2775,15 +2776,15 @@ class LegalSorterApp:
             return
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_sqlite(self.db_path)
             cur = conn.cursor()
             cur.execute("SELECT is_bookmarked FROM documents WHERE id=?", (doc_id,))
             row = cur.fetchone()
             
             if row:
                 next_state = 1 if not row[0] else 0
-                cur.execute("UPDATE documents SET is_bookmarked=? WHERE id=?", (next_state, doc_id))
-                conn.commit()
+                safe_connection_execute(conn, "UPDATE documents SET is_bookmarked=? WHERE id=?", (next_state, doc_id))
+                safe_connection_commit(conn)
             conn.close()
             
             self.sync_database()
@@ -2803,10 +2804,9 @@ class LegalSorterApp:
         if target_folder is not None:
             clean_folder_name = target_folder.strip() if target_folder.strip() else None
             try:
-                conn = sqlite3.connect(self.db_path)
-                cur = conn.cursor()
-                cur.execute("UPDATE documents SET user_folder=? WHERE id=?", (clean_folder_name, doc_id))
-                conn.commit()
+                conn = connect_sqlite(self.db_path)
+                safe_connection_execute(conn, "UPDATE documents SET user_folder=? WHERE id=?", (clean_folder_name, doc_id))
+                safe_connection_commit(conn)
                 conn.close()
                 
                 self.sync_database()
@@ -2857,7 +2857,7 @@ class LegalSorterApp:
         import tkinter.messagebox as mb
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_sqlite(self.db_path)
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT user_folder FROM documents WHERE user_folder IS NOT NULL AND user_folder != ''")
             active_folders = [row[0] for row in cursor.fetchall()]
@@ -2894,10 +2894,9 @@ class LegalSorterApp:
 
         if confirm:
             try:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE documents SET user_folder = NULL WHERE user_folder = ?", (target_folder,))
-                conn.commit()
+                conn = connect_sqlite(self.db_path)
+                safe_connection_execute(conn, "UPDATE documents SET user_folder = NULL WHERE user_folder = ?", (target_folder,))
+                safe_connection_commit(conn)
                 conn.close()
                 
                 mb.showinfo("Success", f"Folder tracking profile '{target_folder}' dissolved successfully.")

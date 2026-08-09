@@ -67,7 +67,7 @@ def _check_config_and_db(strict: bool = False) -> tuple[bool, str]:
     db = None
     try:
         db = DB(str(db_path))
-        db.conn.execute("SELECT 1 FROM documents LIMIT 1")
+        db.safe_execute("SELECT 1 FROM documents LIMIT 1")
     except Exception as exc:
         return False, f"Database check failed: {exc}"
     finally:

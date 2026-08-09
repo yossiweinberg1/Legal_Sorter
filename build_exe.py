@@ -100,16 +100,15 @@ def main() -> None:
         *mode_flag,
         "--name", "LegalSorter",
         "--windowed",                    # no console window (GUI app)
-        "--icon", "legal_sorter.ico",    # generated at first run if absent
+        "--icon", "legal_sorter.ico",    # use existing .ico when present
         *data_args,
         *hidden_args,
         "--noconfirm",                   # overwrite previous build
         "app.pyw",
     ]
 
-    # Drop --icon arg if the ico file does not exist yet; PyInstaller will use
-    # its default icon and the real one will be embedded on the next build after
-    # the user has run the app once (which generates legal_sorter.ico).
+    # Drop --icon arg if the .ico file does not exist yet; PyInstaller will use
+    # its default icon rather than forcing a regeneration step.
     if not (ROOT / "legal_sorter.ico").exists():
         try:
             idx = cmd.index("--icon")

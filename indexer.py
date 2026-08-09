@@ -1,16 +1,16 @@
-import sqlite3
 import json
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from src.database import connect_sqlite, resolve_db_path
 
 # 1. Load a fast, local embedding model (downloads automatically the first time)
 print("📥 Loading local tokenization model...")
 model = SentenceTransformer('all-MiniLM-L6-v2') 
 
 # 2. Connect to your database
-db_path = r"C:\LegalSorter\index\legal_sorter.db"
-conn = sqlite3.connect(db_path)
+db_path = resolve_db_path()
+conn = connect_sqlite(db_path)
 cursor = conn.cursor()
 
 # 3. Pull the text AND the metadata (citations, keywords, entities)

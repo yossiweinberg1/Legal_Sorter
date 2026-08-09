@@ -29,10 +29,11 @@ from __future__ import annotations
 import os
 import re
 import json
-import sqlite3
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+from .database import connect_sqlite
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ def _load_all(db_path: str, barcode_prefix: str | None = None) -> list[_CaseRow]
     """
     rows: list[_CaseRow] = []
     try:
-        with sqlite3.connect(db_path) as conn:
+        with connect_sqlite(db_path) as conn:
             if barcode_prefix is not None:
                 if "%" in barcode_prefix:
                     # Raw wildcard pattern from barcode_prefix() — use as-is
@@ -193,7 +194,7 @@ def _load_all(db_path: str, barcode_prefix: str | None = None) -> list[_CaseRow]
 
 def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
     try:
-        with sqlite3.connect(db_path) as conn:
+        with connect_sqlite(db_path) as conn:
             cur = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, text,
                           keywords_json, citations_json, barcode, barcode_confidence
@@ -221,7 +222,7 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
 def _load_one_by_barcode(db_path: str, barcode: str) -> _CaseRow | None:
     """Fetch a single document by its exact structured barcode ID."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with connect_sqlite(db_path) as conn:
             cur = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, text,
                           keywords_json, citations_json, barcode, barcode_confidence

@@ -1,8 +1,9 @@
 import json
 import re
-import sqlite3
 import logging
 from dataclasses import dataclass
+
+from .database import connect_sqlite
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def _extract_ruling_logic(entities_json: str) -> str:
 
 def _load_docs(db_path: str) -> list[StudyDoc]:
     try:
-        with sqlite3.connect(db_path) as conn:
+        with connect_sqlite(db_path) as conn:
             cur = conn.cursor()
             cur.execute(
                 """
