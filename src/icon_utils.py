@@ -132,42 +132,100 @@ def _logo_png_bytes(size: int) -> bytes:
     s = size / 100.0
     pt = lambda x, y: (x * s, y * s)
 
-    # Bottom book pages.
-    _draw_polyline(canvas, [pt(10, 78), pt(24, 72), pt(38, 75), pt(50, 82)], TEAL, 3.2 * s)
-    _draw_polyline(canvas, [pt(13, 83), pt(27, 78), pt(40, 80), pt(50, 86)], NAVY, 2.8 * s)
-    _draw_polyline(canvas, [pt(50, 82), pt(62, 75), pt(76, 72), pt(90, 78)], TEAL, 3.2 * s)
-    _draw_polyline(canvas, [pt(50, 86), pt(60, 80), pt(73, 78), pt(87, 83)], NAVY, 2.8 * s)
+    # ------------------------------------------------------------------ #
+    # Open book at bottom (navy spine + teal page edges fanning outward)  #
+    # ------------------------------------------------------------------ #
+    # Book spine / centre crease
+    _draw_line(canvas, pt(50, 72), pt(50, 90), NAVY, 2.4 * s)
+    # Left teal page arcs (approximated as polylines fanning up-left)
+    _draw_polyline(canvas, [pt(50, 72), pt(35, 68), pt(15, 72), pt(8, 79)], TEAL, 3.6 * s)
+    _draw_polyline(canvas, [pt(50, 76), pt(36, 73), pt(18, 77), pt(11, 83)], TEAL, 2.6 * s)
+    # Left navy page (slightly inside the teal)
+    _draw_polyline(canvas, [pt(50, 79), pt(37, 76), pt(20, 80), pt(14, 86)], NAVY, 2.2 * s)
+    # Right teal page arcs
+    _draw_polyline(canvas, [pt(50, 72), pt(65, 68), pt(85, 72), pt(92, 79)], TEAL, 3.6 * s)
+    _draw_polyline(canvas, [pt(50, 76), pt(64, 73), pt(82, 77), pt(89, 83)], TEAL, 2.6 * s)
+    # Right navy page
+    _draw_polyline(canvas, [pt(50, 79), pt(63, 76), pt(80, 80), pt(86, 86)], NAVY, 2.2 * s)
+    # Bottom of book (flat base)
+    _draw_line(canvas, pt(14, 86), pt(86, 86), NAVY, 2.8 * s)
 
-    # Center stacked documents / chevrons.
-    _fill_polygon(canvas, [pt(30, 42), pt(58, 54), pt(46, 64), pt(18, 52)], NAVY)
-    _fill_polygon(canvas, [pt(26, 56), pt(54, 68), pt(42, 78), pt(14, 66)], NAVY)
-    _fill_polygon(canvas, [pt(43, 61), pt(71, 73), pt(59, 83), pt(31, 71)], NAVY)
-    _fill_polygon(canvas, [pt(38, 44), pt(57, 52), pt(52, 57), pt(33, 49)], SLATE)
-    _draw_line(canvas, pt(52, 45), pt(73, 54), TEAL, 4.4 * s)
-    _fill_circle(canvas, 53 * s, 55 * s, 2.4 * s, TEAL)
-    _fill_circle(canvas, 28 * s, 63 * s, 2.2 * s, CYAN)
-    _fill_circle(canvas, 36 * s, 67 * s, 1.8 * s, SLATE)
-    _draw_line(canvas, pt(28, 63), pt(36, 67), CYAN, 1.6 * s)
+    # ------------------------------------------------------------------ #
+    # Hexagonal shield body (dark navy + slate interior highlight)        #
+    # ------------------------------------------------------------------ #
+    # Hex shield outline (flat-top hexagon, pointing left/right)
+    # Six vertices centred at (50, 55), width ≈ 40, height ≈ 36
+    hex_pts = [
+        pt(50, 35),   # top
+        pt(68, 43),   # upper-right
+        pt(68, 63),   # lower-right
+        pt(50, 72),   # bottom
+        pt(32, 63),   # lower-left
+        pt(32, 43),   # upper-left
+    ]
+    _fill_polygon(canvas, hex_pts, NAVY)
+    # Inner highlight (slightly smaller hex for 3-D look)
+    inner_scale = 0.80
+    cx, cy = 50, 53.5
+    inner_pts = [
+        pt(cx + (px - cx) * inner_scale, cy + (py - cy) * inner_scale)
+        for (px, py) in [(50, 35), (68, 43), (68, 63), (50, 72), (32, 63), (32, 43)]
+    ]
+    _fill_polygon(canvas, inner_pts, SLATE)
 
-    # Scale beam and center pillar.
-    _draw_polyline(canvas, [pt(18, 19), pt(30, 16), pt(40, 20), pt(50, 15), pt(60, 20), pt(70, 16), pt(82, 19)], NAVY, 4.1 * s)
-    _draw_line(canvas, pt(50, 15), pt(50, 41), NAVY, 4.4 * s)
-    _fill_polygon(canvas, [pt(50, 6), pt(53, 10), pt(50, 14), pt(47, 10)], NAVY)
-    _fill_circle(canvas, 18 * s, 19 * s, 2.0 * s, NAVY)
-    _fill_circle(canvas, 82 * s, 19 * s, 2.0 * s, NAVY)
-    _fill_circle(canvas, 50 * s, 15 * s, 2.8 * s, NAVY)
+    # ------------------------------------------------------------------ #
+    # S-shaped routing / sorting icon inside the shield (teal accents)   #
+    # ------------------------------------------------------------------ #
+    # Upper-left arrow block (upper arm of the S)
+    _fill_polygon(canvas, [pt(36, 42), pt(52, 42), pt(52, 47), pt(41, 47), pt(41, 52), pt(36, 52)], SLATE)
+    # Upper-right teal accent bar
+    _fill_polygon(canvas, [pt(54, 42), pt(64, 42), pt(64, 46), pt(54, 46)], TEAL)
+    # Arrow head pointing right on upper arm
+    _fill_polygon(canvas, [pt(48, 39), pt(55, 43), pt(48, 47)], NAVY)
+    # Lower-right arrow block (lower arm of the S)
+    _fill_polygon(canvas, [pt(48, 55), pt(64, 55), pt(64, 60), pt(59, 60), pt(59, 65), pt(48, 65)], SLATE)
+    # Lower-left teal accent bar
+    _fill_polygon(canvas, [pt(36, 61), pt(46, 61), pt(46, 65), pt(36, 65)], TEAL)
+    # Arrow head pointing left on lower arm
+    _fill_polygon(canvas, [pt(52, 52), pt(45, 57), pt(52, 61)], NAVY)
+    # Small teal routing node (centre dot) and connector line
+    _fill_circle(canvas, 50 * s, 53.5 * s, 2.6 * s, TEAL)
+    _fill_circle(canvas, 38 * s, 57 * s, 2.0 * s, CYAN)
+    _draw_line(canvas, pt(38, 57), pt(50, 53.5), CYAN, 1.6 * s)
 
-    # Hangers.
-    _draw_line(canvas, pt(24, 22), pt(15, 43), NAVY, 2.0 * s)
-    _draw_line(canvas, pt(24, 22), pt(33, 43), NAVY, 2.0 * s)
-    _draw_line(canvas, pt(76, 22), pt(67, 43), NAVY, 2.0 * s)
-    _draw_line(canvas, pt(76, 22), pt(85, 43), NAVY, 2.0 * s)
+    # ------------------------------------------------------------------ #
+    # Scales of justice at top                                            #
+    # ------------------------------------------------------------------ #
+    # Center pillar (vertical bar from top of hex to tip finial)
+    _draw_line(canvas, pt(50, 10), pt(50, 35), NAVY, 4.4 * s)
+    # Diamond / flame finial at very top
+    _fill_polygon(canvas, [pt(50, 4), pt(53, 8), pt(50, 13), pt(47, 8)], NAVY)
 
-    # Pans.
-    _fill_lower_ellipse(canvas, 24 * s, 45 * s, 12 * s, 8 * s, NAVY)
-    _fill_lower_ellipse(canvas, 76 * s, 45 * s, 12 * s, 8 * s, NAVY)
-    _draw_line(canvas, pt(12, 45), pt(36, 45), NAVY, 2.4 * s)
-    _draw_line(canvas, pt(64, 45), pt(88, 45), NAVY, 2.4 * s)
+    # Main beam (slightly arched polyline)
+    _draw_polyline(canvas, [pt(15, 20), pt(28, 17), pt(50, 14), pt(72, 17), pt(85, 20)], NAVY, 3.8 * s)
+    # Centre pivot knob
+    _fill_circle(canvas, 50 * s, 14 * s, 2.6 * s, NAVY)
+    # End knobs on beam
+    _fill_circle(canvas, 15 * s, 20 * s, 2.0 * s, NAVY)
+    _fill_circle(canvas, 85 * s, 20 * s, 2.0 * s, NAVY)
+
+    # Left hanging chains
+    _draw_line(canvas, pt(21, 22), pt(14, 36), NAVY, 1.8 * s)
+    _draw_line(canvas, pt(21, 22), pt(28, 36), NAVY, 1.8 * s)
+    # Right hanging chains
+    _draw_line(canvas, pt(79, 22), pt(72, 36), NAVY, 1.8 * s)
+    _draw_line(canvas, pt(79, 22), pt(86, 36), NAVY, 1.8 * s)
+
+    # Left pan (flat top rim + lower half-ellipse)
+    _draw_line(canvas, pt(10, 36), pt(32, 36), NAVY, 2.4 * s)
+    _fill_lower_ellipse(canvas, 21 * s, 36 * s, 11 * s, 7 * s, NAVY)
+    # Right pan
+    _draw_line(canvas, pt(68, 36), pt(90, 36), NAVY, 2.4 * s)
+    _fill_lower_ellipse(canvas, 79 * s, 36 * s, 11 * s, 7 * s, NAVY)
+
+    # Small teal triangle accents inside each pan (decorative highlights)
+    _fill_polygon(canvas, [pt(17, 37), pt(21, 37), pt(19, 40)], TEAL)
+    _fill_polygon(canvas, [pt(75, 37), pt(79, 37), pt(77, 40)], TEAL)
 
     # Build RGBA scanlines (color type 6: R G B A per pixel).
     def _pixel_rgba(p: tuple[int, int, int]) -> bytes:

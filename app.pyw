@@ -131,6 +131,7 @@ class LegalSorterApp:
         self.root.geometry("1380x860")
         self.root.minsize(1120, 740)
         self._app_icon = None
+        self._tabbed_viewers = {}
         self.apply_branding()
         
         self.stop_event = threading.Event()
@@ -405,6 +406,169 @@ class LegalSorterApp:
 
         win.focus_set()
 
+    def _show_tabbed_viewer(self, viewer_id: str, window_title: str, tabs: list[tuple[str, str, str]], source_url: str = ""):
+        """Open or refresh a reusable tabbed read-only viewer window."""
+        state = self._tabbed_viewers.get(viewer_id)
+        win = state["win"] if state and state.get("win") and state["win"].winfo_exists() else None
+
+        if not win:
+            win = tk.Toplevel(self.root)
+            win.geometry("980x760")
+            win.minsize(700, 520)
+            state = {
+                "win": win,
+                "tab_text_widgets": {},
+                "tab_contents": {},
+                "tab_frames": {},
+            }
+            self._tabbed_viewers[viewer_id] = state
+
+            header = ttk.Frame(win, padding=(10, 6))
+            header.pack(side=tk.TOP, fill=tk.X)
+            title_var = tk.StringVar(value=window_title)
+            state["title_var"] = title_var
+            ttk.Label(header, textvariable=title_var, font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
+
+            toolbar = ttk.Frame(win, padding=(6, 2))
+            toolbar.pack(side=tk.TOP, fill=tk.X)
+            copy_status = ttk.Label(toolbar, text="", foreground="#2ecc71", font=("Segoe UI", 9))
+            state["copy_status"] = copy_status
+
+            notebook = ttk.Notebook(win)
+            notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+            state["notebook"] = notebook
+
+            status_bar = ttk.Label(
+                win,
+                text="",
+                font=("Segoe UI", 8),
+                foreground="gray",
+                anchor="w",
+            )
+            status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+            state["status_bar"] = status_bar
+
+            def _active_tab_key() -> str | None:
+                tab_id = notebook.select()
+                for key, frame in state["tab_frames"].items():
+                    if str(frame) == tab_id:
+                        return key
+                return None
+
+            def _active_text_widget():
+                key = _active_tab_key()
+                return state["tab_text_widgets"].get(key) if key else None
+
+            def _set_copy_status(message: str):
+                copy_status.config(text=message)
+                win.after(3000, lambda: copy_status.config(text=""))
+
+            def _refresh_status_bar(_event=None):
+                key = _active_tab_key()
+                content = state["tab_contents"].get(key, "")
+                status_bar.config(text=f"  {len(content):,} characters  |  {len(content.splitlines()):,} lines")
+
+            def _copy_all():
+                widget = _active_text_widget()
+                if not widget:
+                    return
+                data = widget.get("1.0", "end-1c")
+                win.clipboard_clear()
+                win.clipboard_append(data)
+                _set_copy_status("✅ Copied active tab.")
+
+            def _copy_selection():
+                widget = _active_text_widget()
+                if not widget:
+                    return
+                try:
+                    sel = widget.get(tk.SEL_FIRST, tk.SEL_LAST)
+                except tk.TclError:
+                    sel = ""
+                if not sel:
+                    return
+                win.clipboard_clear()
+                win.clipboard_append(sel)
+                _set_copy_status(f"✅ Copied {len(sel)} chars.")
+
+            def _open_url():
+                if source_url and source_url.startswith("http"):
+                    webbrowser.open(source_url)
+
+            ttk.Button(toolbar, text="📋 Copy All", command=_copy_all).pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Button(toolbar, text="📋 Copy Selection", command=_copy_selection).pack(side=tk.LEFT, padx=(0, 4))
+            source_btn = ttk.Button(toolbar, text="🌐 Open Source URL", command=_open_url)
+            source_btn.pack(side=tk.LEFT, padx=(0, 4))
+            state["source_btn"] = source_btn
+            copy_status.pack(side=tk.LEFT, padx=8)
+            ttk.Button(toolbar, text="✖ Close", command=win.destroy).pack(side=tk.RIGHT)
+
+            notebook.bind("<<NotebookTabChanged>>", _refresh_status_bar)
+            state["refresh_status_bar"] = _refresh_status_bar
+
+            def _on_close():
+                try:
+                    self._tabbed_viewers.pop(viewer_id, None)
+                finally:
+                    win.destroy()
+
+            win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        win.title(window_title)
+        state["title_var"].set(window_title)
+        state["source_btn"].configure(state=(tk.NORMAL if source_url and source_url.startswith("http") else tk.DISABLED))
+
+        existing_keys = set(state["tab_text_widgets"].keys())
+        tab_keys = [k for k, _, _ in tabs]
+        for tab_key in existing_keys - set(tab_keys):
+            state["tab_text_widgets"].pop(tab_key, None)
+            parent = state["tab_frames"].pop(tab_key, None)
+            try:
+                if parent is not None:
+                    state["notebook"].forget(parent)
+            except Exception:
+                pass
+            if parent is not None:
+                parent.destroy()
+            state["tab_contents"].pop(tab_key, None)
+
+        for tab_key, tab_label, tab_content in tabs:
+            text_widget = state["tab_text_widgets"].get(tab_key)
+            if text_widget is None:
+                tab_frame = ttk.Frame(state["notebook"])
+                text_frame = ttk.Frame(tab_frame)
+                text_frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+
+                text_widget = tk.Text(
+                    text_frame,
+                    wrap=tk.WORD,
+                    font=("Consolas", 10),
+                    bg="#1a1a2e",
+                    fg="#e0e0f0",
+                    insertbackground="#e0e0f0",
+                    relief="flat",
+                    borderwidth=0,
+                    padx=12,
+                    pady=8,
+                )
+                text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                vsb = ttk.Scrollbar(text_frame, command=text_widget.yview)
+                vsb.pack(side=tk.RIGHT, fill=tk.Y)
+                text_widget.config(yscrollcommand=vsb.set)
+
+                state["notebook"].add(tab_frame, text=tab_label)
+                state["tab_text_widgets"][tab_key] = text_widget
+                state["tab_frames"][tab_key] = tab_frame
+
+            text_widget.config(state=tk.NORMAL)
+            text_widget.delete("1.0", tk.END)
+            text_widget.insert(tk.END, tab_content)
+            text_widget.config(state=tk.DISABLED)
+            state["tab_contents"][tab_key] = tab_content
+
+        state["refresh_status_bar"]()
+        win.focus_set()
+
     def _load_case_workspace_payload(self, doc_id: str) -> dict | None:
         if not self.db_path or not os.path.exists(self.db_path):
             return None
@@ -472,10 +636,18 @@ class LegalSorterApp:
             "------------------------\n"
             f"{other_text}"
         )
-        self._show_case_viewer(f"{title} — Case Text", payload["text"] or "No case text available.", payload["source_url"])
-        self._show_case_viewer(f"{title} — Citations", citations_text, payload["source_url"])
-        self._show_case_viewer(f"{title} — Rulings", str(payload["ruling_logic"]), payload["source_url"])
-        self._show_case_viewer(f"{title} — Overturned / History", history_text, payload["source_url"])
+        tabs = [
+            ("case_text", "📄 Case Text", payload["text"] or "No case text available."),
+            ("citations", "📚 Citations", citations_text),
+            ("rulings", "⚖️ Rulings", str(payload["ruling_logic"])),
+            ("history", "🧭 Overturned / History", history_text),
+        ]
+        self._show_tabbed_viewer(
+            viewer_id="case_workspace",
+            window_title=f"🧩 {title} — Case Workspace",
+            tabs=tabs,
+            source_url=payload["source_url"],
+        )
 
     def _open_llm_workspace_windows(self, question: str, answer: str, sources: list[dict]):
         answer_text = f"QUESTION\n--------\n{question}\n\nANSWER\n------\n{answer}"
@@ -501,11 +673,18 @@ class LegalSorterApp:
                 for idx, s in enumerate(sources, 1)
             ]
         ) if sources else "No source text available."
-        self._show_case_viewer("LLM — Answer", answer_text)
-        self._show_case_viewer("LLM — Sources", sources_text)
-        self._show_case_viewer("LLM — Full Source Text", full_sources_text)
+        tabs = [
+            ("llm_answer", "🧠 Answer", answer_text),
+            ("llm_sources", "🔗 Sources", sources_text),
+            ("llm_full", "📖 Full Source Text", full_sources_text),
+        ]
+        self._show_tabbed_viewer(
+            viewer_id="llm_workspace",
+            window_title="🤖 LLM Workspace",
+            tabs=tabs,
+        )
 
-    def open_case_and_repull(self, doc_id: str):
+    def open_case_and_repull(self, doc_id: str, show_viewer: bool = True):
         """
         Unified opener: Checks for a valid CourtListener URL to repull.
         If bulk data or missing URL, it shows the text directly in the app viewer.
@@ -532,9 +711,10 @@ class LegalSorterApp:
             if not text_content:
                 return False, "No URL available and no text archived in database."
             label = ref_no or doc_id
-            self.root.after(0, lambda: self._show_case_viewer(
-                title=label, content=text_content, source_url=source_url or ""
-            ))
+            if show_viewer:
+                self.root.after(0, lambda: self._show_case_viewer(
+                    title=label, content=text_content, source_url=source_url or ""
+                ))
             return True, label
 
         # NORMAL REPULL: If standard HTTP URL exists, download and show in viewer
@@ -555,9 +735,10 @@ class LegalSorterApp:
             file_content = f"[Binary or unreadable file — saved to: {tmp_path}]"
 
         label = ref_no or doc_id
-        self.root.after(0, lambda: self._show_case_viewer(
-            title=label, content=file_content, source_url=source_url
-        ))
+        if show_viewer:
+            self.root.after(0, lambda: self._show_case_viewer(
+                title=label, content=file_content, source_url=source_url
+            ))
         return True, tmp_path
 
     def cleanup_temp_files(self):
@@ -852,14 +1033,16 @@ class LegalSorterApp:
         # ── Main paned window ─────────────────────────────────────────
         self.paned_window = tk.PanedWindow(
             self.body_container, orient=tk.VERTICAL,
-            sashrelief=tk.FLAT, sashwidth=4,
+            sashrelief=tk.GROOVE, sashwidth=8, sashpad=4,
             bg=p["SEL_BG"]
         )
         self.paned_window.pack(fill=tk.BOTH, expand=True)
 
         # ── TOP PANE: Notebook with two tabs ─────────────────────────
         top_pane = ttk.Frame(self.paned_window, padding=4)
-        self.paned_window.add(top_pane, height=520)
+        # minsize ensures the top pane can never be dragged to zero,
+        # so the sash is always recoverable even after dragging to an edge.
+        self.paned_window.add(top_pane, height=520, minsize=200)
 
         self.main_notebook = ttk.Notebook(top_pane)
         self.main_notebook.pack(fill=tk.BOTH, expand=True)
@@ -877,7 +1060,9 @@ class LegalSorterApp:
         # ── BOTTOM PANE: Engine log ───────────────────────────────────
         log_frame = ttk.LabelFrame(self.paned_window,
                                    text=" Live Engine Output ", padding=6)
-        self.paned_window.add(log_frame)
+        # minsize on the log pane prevents it from being collapsed completely,
+        # guaranteeing the sash stays reachable after dragging to the bottom edge.
+        self.paned_window.add(log_frame, minsize=80)
 
         # Log toolbar: autoscroll + copy buttons + status flash label
         log_toolbar = ttk.Frame(log_frame)
@@ -2565,7 +2750,7 @@ class LegalSorterApp:
             doc_id = vals[0] if vals else item
 
             self._open_case_workspace_windows(doc_id)
-            ok, result = self.open_case_and_repull(doc_id)
+            ok, result = self.open_case_and_repull(doc_id, show_viewer=False)
             if not ok:
                 messagebox.showerror("Open case", result)
         except Exception as e:

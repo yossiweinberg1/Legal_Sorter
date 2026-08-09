@@ -186,6 +186,34 @@ Windows no-console launcher:
 LegalSorter.vbs
 ```
 
+### Building a standalone Windows .exe
+
+To ship LegalSorter as a double-click executable with no Python install required:
+
+**1. Install PyInstaller in your venv:**
+```
+pip install pyinstaller
+```
+
+**2. Run the build script from the repo root:**
+```
+python build_exe.py
+```
+This produces a `dist/LegalSorter/` folder.  
+Share the **entire folder** — users run `LegalSorter.exe` inside it.
+
+**Single-file build** (slightly slower to launch, easier to hand off):
+```
+python build_exe.py --onefile
+```
+This produces a single `dist/LegalSorter.exe`.
+
+> **Tip — smaller builds:** If GPU/CUDA support is not needed, install the CPU-only
+> torch wheel before building to dramatically reduce the output size:
+> ```
+> pip install torch --index-url https://download.pytorch.org/whl/cpu
+> ```
+
 ### Web interface (read-only, searchable website)
 ```
 uvicorn web_app:app --host 0.0.0.0 --port 8000
