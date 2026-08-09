@@ -317,10 +317,13 @@ class DB:
         except ImportError:
             import barcode as barcode_mod  # type: ignore[no-redef]
 
-        # Collect all barcodes already assigned to OTHER documents
+        # Determine the base barcode (strip any existing single-letter suffix)
+        # then query only the collision candidates (exact + A–Z) for this base.
+        base_bc = barcode[:-1] if (len(barcode) > 1 and barcode[-1].isupper()) else barcode
+        like_pattern = base_bc.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         rows = self.conn.execute(
-            "SELECT barcode FROM documents WHERE barcode IS NOT NULL AND id != ?",
-            (doc_id,),
+            "SELECT barcode FROM documents WHERE barcode LIKE ? ESCAPE '\\' AND id != ?",
+            (like_pattern + "%", doc_id),
         ).fetchall()
         existing: set[str] = {r[0] for r in rows if r[0]}
         barcode = barcode_mod.resolve_collision(barcode, existing)

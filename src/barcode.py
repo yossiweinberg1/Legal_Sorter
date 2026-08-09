@@ -517,6 +517,10 @@ def resolve_collision(barcode: str, existing: set[str]) -> str:
 
     If *barcode* is not in *existing* it is returned unchanged.  Otherwise the
     SQ segment is extended with 'A', 'B', … 'Z' until a free slot is found.
+    If *barcode* already ends with a single uppercase letter (from a previous
+    collision resolution), that letter is stripped before a new suffix is tried
+    so that re-generation passes do not accumulate unbounded suffix chains.
+
     Raises ``RuntimeError`` if all 26 suffixes are exhausted (astronomically
     unlikely in practice).
 
@@ -529,11 +533,16 @@ def resolve_collision(barcode: str, existing: set[str]) -> str:
     """
     if barcode not in existing:
         return barcode
+
+    # Strip any single trailing uppercase letter left by a previous collision
+    # resolution so we always try all 26 suffixes from a clean base.
+    base = barcode[:-1] if (len(barcode) > 1 and barcode[-1].isupper()) else barcode
+
     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        candidate = barcode + letter
+        candidate = base + letter
         if candidate not in existing:
             return candidate
-    raise RuntimeError(f"[BARCODE] All 26 collision suffixes exhausted for {barcode}")
+    raise RuntimeError(f"[BARCODE] All 26 collision suffixes exhausted for {base}")
 
 
 def barcode_prefix(

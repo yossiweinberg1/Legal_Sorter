@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -39,6 +40,8 @@ app = FastAPI(
     description="Search, AI Q&A, and bulk-ingest interface for indexed legal cases.",
     version="1.1.0",
 )
+
+log = logging.getLogger(__name__)
 
 
 def _db_path() -> str:
@@ -422,7 +425,11 @@ def admin_regen_barcodes(
                     confidence=confidence, confirm_threshold=confirm_threshold,
                 )
                 succeeded += 1
-            except Exception:
+            except Exception as exc:
+                log.warning(
+                    "regen_barcodes: failed for doc %s (ref=%s): %s",
+                    doc["id"][:12], doc["ref_no"], exc,
+                )
                 failed += 1
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
