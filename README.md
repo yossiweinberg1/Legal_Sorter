@@ -313,3 +313,122 @@ Training now actually injects citation graph vectors into the residual stream
 ### Data integrity
 Run `python auditor.py` any time to spot-check a random locally stored
 case against the live CourtListener API.
+
+---
+
+## Structured Barcode System
+
+Every indexed document receives a **Smart Barcode** — a structured ID that
+encodes the document's classification into a compact, human-readable string.
+
+### Format
+
+```
+LS-{CT}-{JR}-{SM}-{YR}-{SQ}
+```
+
+| Segment | Length | Description | Examples |
+|---------|--------|-------------|---------|
+| `LS` | 2 | Namespace prefix | always `LS` |
+| `CT` | 2 | Case type | `SC` Supreme Court · `CA` Circuit · `DC` District · `ST` State · `SB` Statute · `BR` Brief · `OT` Other |
+| `JR` | 2-4 | Jurisdiction | `US` SCOTUS · `CA9` 9th Cir. · `NYS` S.D.N.Y. · `TEX` Texas · `UNK` Unknown |
+| `SM` | 3 | Subject matter | `CON` Constitutional · `CRM` Criminal · `CIV` Civil rights · `CTR` Contracts · `TRT` Torts · `FAM` Family · `IMM` Immigration · `BNK` Bankruptcy · `PRP` Property · `LAB` Labor · `TAX` Tax · `OTH` Other |
+| `YR` | 4 | Decision year | `2022` · `0000` if unknown |
+| `SQ` | 6 | Sequence | ties back to the `LC-XXXXXX` reference number |
+
+**Example IDs:**
+```
+LS-SC-US-CON-2022-000128   # U.S. Supreme Court, constitutional law, 2022
+LS-CA-CA9-CIV-2019-000042  # Ninth Circuit, civil rights, 2019
+LS-DC-NYS-CRM-2021-000007  # S.D.N.Y. district court, criminal, 2021
+LS-ST-TEX-FAM-2020-000315  # Texas state court, family law, 2020
+```
+
+### Confidence Score
+
+Every barcode has a `barcode_confidence` value (float `0.0` – `1.0`):
+
+| Strategy | Confidence | When |
+|----------|------------|------|
+| `llm` | `0.90` | LLM successfully classified all segments |
+| `rules` | `0.75` | Rule/gazetteer engine only (deterministic but limited) |
+| `llm_with_fallback` → fallback | `0.65` | LLM attempted but failed; rules used |
+| Manual confirm | `1.00` | Set by `DB.confirm_barcode()` |
+
+When confidence is **≥ `confirm_threshold`** (default `0.85`, set in
+`config.yaml` under `barcode.confirm_threshold`), the barcode is automatically
+marked `barcode_confirmed = 1` and excluded from future re-generation passes.
+
+### Generation Strategies
+
+Configure `barcode.strategy` in `config.yaml`:
+
+| Value | Behaviour |
+|-------|-----------|
+| `"rules"` | Pure regex/gazetteer — fast, no LLM needed |
+| `"llm"` | LLM only — richer subject classification; raises on failure |
+| `"llm_with_fallback"` | Try LLM first, fall back to rules (default) |
+
+### Collision Handling
+
+Because `SQ` is derived from the globally-unique `LC-XXXXXX` reference number,
+true collisions are essentially impossible under normal operation.  When an edge
+case (NULL ref\_no, manual edit, backfill) does produce a collision, a single
+letter is appended to the SQ segment:
+
+```
+LS-ST-TEX-FAM-2020-000000    ← first document
+LS-ST-TEX-FAM-2020-000000A   ← second (collision resolved)
+LS-ST-TEX-FAM-2020-000000B   ← third
+```
+
+### Barcodes in Search Results and API
+
+Barcodes and their confidence scores are included in **all** API outputs:
+
+- `GET /api/search` — each result includes `barcode` and `barcode_confidence`
+- `GET /api/cases` — each list item includes `barcode` and `barcode_confidence`
+- `GET /api/case/{doc_id}` — full barcode metadata including `barcode_strategy` and `barcode_confirmed`
+- `GET /api/barcode/{barcode}` — look up a document directly by its barcode
+- `POST /api/ask` — each source citation includes `barcode` and `barcode_confidence`
+
+The LLM also sees the barcode in its source labels during Q&A:
+```
+[SOURCE 1: LC-000042 / LS-CA-CA9-CIV-2019-000042]
+```
+This lets the model reason about court level, jurisdiction, and topic from the
+ID alone without reading the full text.
+
+### Re-generating Barcodes
+
+To find and re-generate barcodes that are missing, failed, or below the
+confidence threshold, run the CLI tool:
+
+```bash
+# Re-generate only low-confidence barcodes (threshold from config.yaml)
+python regen_barcodes.py
+
+# Use a custom threshold
+python regen_barcodes.py --min-confidence 0.70
+
+# Force re-generate everything (including manually confirmed barcodes)
+python regen_barcodes.py --force
+
+# Dry-run: show what would be processed, no changes made
+python regen_barcodes.py --dry-run
+```
+
+You can also trigger re-generation via the API (admin role required):
+
+```http
+POST /api/admin/regen_barcodes?min_confidence=0.85&force=false
+```
+
+Response:
+```json
+{
+  "candidates": 12,
+  "succeeded": 11,
+  "failed": 1
+}
+```

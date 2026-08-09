@@ -121,9 +121,14 @@ def _fill_lower_ellipse(
                 canvas[y][x] = color
 
 
+# Transparent sentinel – pixels that should remain fully transparent.
+_TRANSPARENT: tuple[int, int, int] = (-1, -1, -1)
+
+
 @lru_cache(maxsize=None)
 def _logo_png_bytes(size: int) -> bytes:
-    canvas = [[WHITE for _ in range(size)] for _ in range(size)]
+    # Use transparent background so the icon blends with any desktop colour.
+    canvas: list[list[tuple[int, int, int]]] = [[_TRANSPARENT for _ in range(size)] for _ in range(size)]
     s = size / 100.0
     pt = lambda x, y: (x * s, y * s)
 
@@ -164,8 +169,14 @@ def _logo_png_bytes(size: int) -> bytes:
     _draw_line(canvas, pt(12, 45), pt(36, 45), NAVY, 2.4 * s)
     _draw_line(canvas, pt(64, 45), pt(88, 45), NAVY, 2.4 * s)
 
+    # Build RGBA scanlines (color type 6: R G B A per pixel).
+    def _pixel_rgba(p: tuple[int, int, int]) -> bytes:
+        if p is _TRANSPARENT:
+            return b"\x00\x00\x00\x00"
+        return bytes(p) + b"\xff"
+
     scanlines = b"".join(
-        b"\x00" + b"".join(bytes(pixel) for pixel in row)
+        b"\x00" + b"".join(_pixel_rgba(pixel) for pixel in row)
         for row in canvas
     )
 
@@ -175,7 +186,8 @@ def _logo_png_bytes(size: int) -> bytes:
 
     return (
         b"\x89PNG\r\n\x1a\n"
-        + _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+        # color_type=6 → RGBA (required for PNG-in-ICO on Windows)
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
         + _chunk(b"IDAT", zlib.compress(scanlines, 9))
         + _chunk(b"IEND", b"")
     )
@@ -186,9 +198,14 @@ def make_logo_png(dest: Path, size: int = 256) -> None:
     dest.write_bytes(_logo_png_bytes(size))
 
 
-def ensure_logo_png(dest: Path, size: int = 256) -> str:
-    """Generate the shared Legal Sorter logo PNG if needed."""
-    if not dest.exists():
+def ensure_logo_png(dest: Path, size: int = 256, force: bool = True) -> str:
+    """Generate the shared Legal Sorter logo PNG.
+
+    Pass ``force=False`` to skip regeneration when the file already exists.
+    The default regenerates on every call so stale cached icons are always
+    replaced with the current design.
+    """
+    if force or not dest.exists():
         make_logo_png(dest, size=size)
     return str(dest)
 
@@ -199,17 +216,27 @@ def logo_data_uri(size: int = 256) -> str:
 
 
 def make_icon_ico(dest: Path) -> None:
-    """Write the Windows .ico variant of the shared Legal Sorter logo."""
-    size = 128
+    """Write the Windows .ico variant of the shared Legal Sorter logo.
+
+    Uses a 256×256 RGBA PNG embedded in the ICO container.  A size value
+    of 256 is stored as 0 in the ICO directory entry per the ICO spec.
+    """
+    size = 256
     png = _logo_png_bytes(size)
-    ico_dim = size if size < 256 else 0
+    # Per the ICO spec, a width/height of 256 is encoded as 0 in the entry.
+    ico_dim = 0
     ico_header = struct.pack("<HHH", 0, 1, 1)
     ico_entry = struct.pack("<BBBBHHII", ico_dim, ico_dim, 0, 0, 1, 32, len(png), 22)
     dest.write_bytes(ico_header + ico_entry + png)
 
 
-def ensure_icon(dest: Path) -> str:
-    """Generate the shared Legal Sorter .ico if needed and return its path."""
-    if not dest.exists():
+def ensure_icon(dest: Path, force: bool = True) -> str:
+    """Generate the shared Legal Sorter .ico and return its path.
+
+    Pass ``force=False`` to skip regeneration when the file already exists.
+    The default regenerates on every call so stale cached icons are always
+    replaced with the current design.
+    """
+    if force or not dest.exists():
         make_icon_ico(dest)
     return str(dest)

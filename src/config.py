@@ -158,6 +158,13 @@ def _inject_defaults(cfg: dict) -> dict:
     llm_cfg.setdefault("min_sources", 1)
     llm_cfg.setdefault("timeout_seconds", 60)
 
+    barcode_cfg = cfg.setdefault("barcode", {})
+    barcode_cfg.setdefault("enabled", True)
+    barcode_cfg.setdefault("strategy", "llm_with_fallback")
+    barcode_cfg.setdefault("llm_model", "")
+    barcode_cfg.setdefault("llm_base_url", "")
+    barcode_cfg.setdefault("llm_timeout_seconds", 20)
+
     prod_cfg = cfg.setdefault("production", {})
     prod_cfg.setdefault("enabled", False)
     prod_cfg.setdefault("support_email", "")

@@ -105,6 +105,8 @@ class _CaseRow:
     virtual_folder: str | None
     source_url: str | None
     text: str
+    barcode: str | None = None
+    barcode_confidence: float | None = None
     keywords: list[str] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
 
@@ -112,21 +114,65 @@ class _CaseRow:
 _MAX_LOAD = 2000  # max rows scanned for keyword ranking
 
 
-def _load_all(db_path: str) -> list[_CaseRow]:
+def _load_all(db_path: str, barcode_prefix: str | None = None) -> list[_CaseRow]:
+    """Load documents from the database, with optional barcode filtering.
+
+    Args:
+        db_path:        Path to the SQLite database.
+        barcode_prefix: Restricts results to documents whose barcode matches
+                        this filter.  Two forms are accepted:
+
+                        **Plain prefix** (no ``%`` in the string):
+                          A literal prefix like ``"LS-CA-CA9-"``; the function
+                          escapes any LIKE specials and appends ``%`` automatically.
+
+                        **Raw LIKE pattern** (contains ``%``):
+                          A pattern produced by ``barcode.barcode_prefix()``, e.g.
+                          ``"LS-%-CA9-%-%-"``.  Passed to SQL as-is with no further
+                          escaping or modification.
+
+                        Pass ``None`` to load all documents (up to _MAX_LOAD).
+    """
     rows: list[_CaseRow] = []
     try:
         with sqlite3.connect(db_path) as conn:
-            cur = conn.execute(
-                """SELECT id, ref_no, virtual_folder, source_url, text,
-                          keywords_json, citations_json
-                   FROM documents
-                   WHERE text IS NOT NULL AND text != ''
-                     AND (content_source IS NULL OR content_source != 'snippet_only')
-                     AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)
-                   ORDER BY added_at DESC
-                   LIMIT ?""",
-                (_MAX_LOAD,),
-            )
+            if barcode_prefix is not None:
+                if "%" in barcode_prefix:
+                    # Raw wildcard pattern from barcode_prefix() — use as-is
+                    like_pattern = barcode_prefix
+                else:
+                    # Plain prefix — escape LIKE specials, then append %
+                    like_pattern = (
+                        barcode_prefix
+                        .replace("\\", "\\\\")
+                        .replace("%", "\\%")
+                        .replace("_", "\\_")
+                        + "%"
+                    )
+                cur = conn.execute(
+                    """SELECT id, ref_no, virtual_folder, source_url, text,
+                              keywords_json, citations_json, barcode, barcode_confidence
+                       FROM documents
+                       WHERE text IS NOT NULL AND text != ''
+                         AND (content_source IS NULL OR content_source != 'snippet_only')
+                         AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)
+                         AND barcode LIKE ? ESCAPE '\\'
+                       ORDER BY added_at DESC
+                       LIMIT ?""",
+                    (like_pattern, _MAX_LOAD),
+                )
+            else:
+                cur = conn.execute(
+                    """SELECT id, ref_no, virtual_folder, source_url, text,
+                              keywords_json, citations_json, barcode, barcode_confidence
+                       FROM documents
+                       WHERE text IS NOT NULL AND text != ''
+                         AND (content_source IS NULL OR content_source != 'snippet_only')
+                         AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)
+                       ORDER BY added_at DESC
+                       LIMIT ?""",
+                    (_MAX_LOAD,),
+                )
             for r in cur.fetchall():
                 rows.append(_CaseRow(
                     doc_id=r[0],
@@ -136,6 +182,8 @@ def _load_all(db_path: str) -> list[_CaseRow]:
                     text=r[4] or "",
                     keywords=_safe_json(r[5], []),
                     citations=_safe_json(r[6], []),
+                    barcode=r[7],
+                    barcode_confidence=r[8],
                 ))
     except Exception as exc:
         log.warning("DB load failed: %s", exc)
@@ -147,7 +195,7 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
         with sqlite3.connect(db_path) as conn:
             cur = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, text,
-                          keywords_json, citations_json
+                          keywords_json, citations_json, barcode, barcode_confidence
                    FROM documents WHERE id = ?
                      AND (content_source IS NULL OR content_source != 'snippet_only')
                      AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)""",
@@ -161,6 +209,36 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
                 source_url=r[3], text=r[4] or "",
                 keywords=_safe_json(r[5], []),
                 citations=_safe_json(r[6], []),
+                barcode=r[7],
+                barcode_confidence=r[8],
+            )
+    except Exception as exc:
+        log.warning("DB load_one failed: %s", exc)
+        return None
+
+
+def _load_one_by_barcode(db_path: str, barcode: str) -> _CaseRow | None:
+    """Fetch a single document by its exact structured barcode ID."""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.execute(
+                """SELECT id, ref_no, virtual_folder, source_url, text,
+                          keywords_json, citations_json, barcode, barcode_confidence
+                   FROM documents WHERE barcode = ?
+                     AND (content_source IS NULL OR content_source != 'snippet_only')
+                     AND (sanity_check_passed IS NULL OR sanity_check_passed != 0)""",
+                (barcode,),
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            return _CaseRow(
+                doc_id=r[0], ref_no=r[1], virtual_folder=r[2],
+                source_url=r[3], text=r[4] or "",
+                keywords=_safe_json(r[5], []),
+                citations=_safe_json(r[6], []),
+                barcode=r[7],
+                barcode_confidence=r[8],
             )
     except Exception as exc:
         log.warning("DB load_one failed: %s", exc)
@@ -237,8 +315,18 @@ def query_cases(
     db_path: str,
     question: str,
     top_k: int = 5,
+    barcode_prefix: str | None = None,
 ) -> tuple[str, list[dict]]:
     """Ask a legal question; answer is grounded in the top-k indexed cases.
+
+    Args:
+        db_path:        Path to the SQLite database.
+        question:       The legal research question.
+        top_k:          Number of cases to retrieve and summarise.
+        barcode_prefix: Optional structured ID prefix for pre-filtering.
+                        E.g. ``"LS-CA-CA9-"`` restricts the search to
+                        9th Circuit cases only before any ranking or LLM
+                        work is done.
 
     Uses a two-pass RAG approach so the LLM always reasons over legally
     meaningful content instead of a fixed character slice:
@@ -253,11 +341,17 @@ def query_cases(
 
     Returns:
         (answer_str, sources_list)
-        sources_list entries: {doc_id, ref_no, virtual_folder, source_url}
+        sources_list entries: {doc_id, ref_no, barcode, virtual_folder, source_url}
     """
     cfg = _load_llm_cfg()
-    rows = _load_all(db_path)
+    rows = _load_all(db_path, barcode_prefix=barcode_prefix)
     if not rows:
+        if barcode_prefix:
+            return (
+                f"No indexed documents found matching the prefix '{barcode_prefix}'. "
+                "Try broadening the filter or removing it.",
+                [],
+            )
         return ("No indexed documents found. Ingest cases first.", [])
 
     top = _rank(rows, question, top_k)
@@ -279,8 +373,11 @@ def query_cases(
     summaries: list[str] = []
     for r in top:
         label = r.ref_no or r.doc_id[:12]
+        # Include barcode in the source label so the LLM can reason about
+        # court/jurisdiction/topic from the ID alone.
+        bc_label = f"{label} / {r.barcode}" if r.barcode else label
         user_msg = (
-            f"CASE: {label}\n"
+            f"CASE: {bc_label}\n"
             f"FOLDER: {r.virtual_folder or 'Uncategorized'}\n\n"
             f"--- FULL CASE TEXT ---\n{r.text}\n--- END ---\n\n"
             "Extract the holding, key facts, and citations as instructed."
@@ -293,7 +390,7 @@ def query_cases(
         except Exception as exc:
             log.warning("Pass-1 summary failed for %s: %s", label, exc)
             summary = f"(Summary unavailable for {label})"
-        summaries.append(f"[SOURCE {top.index(r) + 1}: {label}]\n{summary}")
+        summaries.append(f"[SOURCE {top.index(r) + 1}: {bc_label}]\n{summary}")
 
     # --- Pass 2: answer the question from the summaries ---
     context = "\n\n".join(summaries)
@@ -336,6 +433,8 @@ def query_cases(
         {
             "doc_id": r.doc_id,
             "ref_no": r.ref_no,
+            "barcode": r.barcode,
+            "barcode_confidence": r.barcode_confidence,
             "virtual_folder": r.virtual_folder,
             "source_url": r.source_url,
             "retrieval_score": _score(r, set(_tokenize(question))),
@@ -367,6 +466,7 @@ def analyze_case(
         return f"Case {doc_id[:12]} not found in the database."
 
     label = row.ref_no or row.doc_id[:12]
+    bc_label = f"{label} / {row.barcode}" if row.barcode else label
 
     system_msg = (
         "You are an expert legal analyst. "
@@ -375,7 +475,7 @@ def analyze_case(
         "Do not speculate beyond what the text supports."
     )
     user_msg = (
-        f"CASE: {label}\n"
+        f"CASE: {bc_label}\n"
         f"FOLDER: {row.virtual_folder or 'Uncategorized'}\n\n"
         f"--- FULL CASE TEXT ---\n{row.text}\n--- END ---\n\n"
         f"INSTRUCTION: {instruction}"
@@ -387,18 +487,51 @@ def analyze_case(
     ], cfg)
 
 
+def analyze_case_by_barcode(
+    db_path: str,
+    barcode: str,
+    instruction: str,
+) -> str:
+    """Run any LLM instruction against a case located by its structured barcode ID.
+
+    This allows the LLM itself (or any caller) to request a specific document
+    using the human-readable structured ID (e.g. ``"LS-CA-CA9-CIV-2019-000042"``)
+    rather than the opaque SHA256.
+
+    Returns the LLM response string, or an error message if the barcode is not found.
+    """
+    cfg = _load_llm_cfg()
+    row = _load_one_by_barcode(db_path, barcode)
+    if not row:
+        return (
+            f"No document found with barcode '{barcode}'. "
+            "Check the ID or use semantic_search to find the correct document."
+        )
+    return analyze_case(db_path, row.doc_id, instruction)
+
+
 def semantic_search(
     db_path: str,
     query: str,
     top_k: int = 8,
+    barcode_prefix: str | None = None,
 ) -> list[dict]:
     """Return top-k cases ranked by keyword overlap, each with an LLM relevance note.
 
+    Args:
+        db_path:        Path to the SQLite database.
+        query:          The search query string.
+        top_k:          Number of results to return.
+        barcode_prefix: Optional structured ID prefix.  When given, only
+                        documents matching the prefix are considered before
+                        keyword ranking.  E.g. ``"LS-ST-TEX-"`` for Texas
+                        state-court cases only.
+
     Returns a list of dicts:
-        {doc_id, ref_no, virtual_folder, source_url, snippet, relevance_note}
+        {doc_id, ref_no, barcode, virtual_folder, source_url, snippet, relevance_note}
     """
     cfg = _load_llm_cfg()
-    rows = _load_all(db_path)
+    rows = _load_all(db_path, barcode_prefix=barcode_prefix)
     if not rows:
         return []
 
@@ -412,7 +545,8 @@ def semantic_search(
     for i, r in enumerate(top, 1):
         snip = _snippet(r.text, terms)
         label = r.ref_no or r.doc_id[:12]
-        manifest_lines.append(f"{i}. [{label}] {r.virtual_folder or ''} — {snip}")
+        bc_label = f"{label} / {r.barcode}" if r.barcode else label
+        manifest_lines.append(f"{i}. [{bc_label}] {r.virtual_folder or ''} — {snip}")
 
     manifest = "\n".join(manifest_lines)
     system_msg = (
@@ -447,6 +581,7 @@ def semantic_search(
         results.append({
             "doc_id": r.doc_id,
             "ref_no": r.ref_no,
+            "barcode": r.barcode,
             "virtual_folder": r.virtual_folder,
             "source_url": r.source_url,
             "snippet": _snippet(r.text, terms, max_chars=300),

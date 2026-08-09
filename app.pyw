@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
+import shutil
 import sqlite3
 import json
 import os
@@ -856,6 +857,11 @@ class LegalSorterApp:
         tk.Radiobutton(engine_frame, text="S3 Bulk Dump (High-volume streaming)",
                        variable=self.active_engine, value="BULK",
                        command=self.switch_engine, **rb_kw).pack(anchor="w", padx=10, pady=2)
+        ttk.Button(
+            engine_frame,
+            text="📁 Import Local Files…",
+            command=self.import_local_legal_files,
+        ).pack(anchor="w", padx=10, pady=(4, 6))
 
         # COLUMN 2: Case tree with search bar
         self.explorer_frame = ttk.LabelFrame(parent, text=" Crossover Library Matrix ")
@@ -1591,7 +1597,133 @@ class LegalSorterApp:
                 cb.config(command=_make_refresh())
 
         ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=12, pady=8)
+
+        # ── Add a new API token ───────────────────────────────────────────────
+        add_frame = ttk.LabelFrame(win, text=" Add New API Token ")
+        add_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        new_key_var = tk.StringVar()
+        new_key_entry = ttk.Entry(add_frame, textvariable=new_key_var, show="*", width=42)
+        new_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 4), pady=8)
+
+        def _toggle_show_key():
+            new_key_entry.config(show="" if new_key_entry.cget("show") == "*" else "*")
+
+        ttk.Button(add_frame, text="👁", width=3, command=_toggle_show_key).pack(
+            side=tk.LEFT, pady=8
+        )
+
+        def _add_key():
+            raw = new_key_var.get().strip()
+            if len(raw) < 20:
+                messagebox.showwarning(
+                    "Invalid Token",
+                    "That token looks too short. Please paste your full CourtListener API token.",
+                    parent=win,
+                )
+                return
+            if raw in TOKEN_REGISTRY:
+                messagebox.showinfo("Already Registered", "That token is already in the registry.", parent=win)
+                return
+            # Register in-memory
+            TOKEN_REGISTRY[raw] = {"enabled": True, "cooldown_until": 0, "consecutive_429s": 0}
+            # Persist to config.yaml (append to existing tokens)
+            try:
+                cfg_all = cfgmod.load_config()
+                existing = cfg_all.get("courtlistener", {}).get("api_tokens", [])
+                import yaml
+                cfg_path = Path(__file__).resolve().parent / "config.yaml"
+                cfg_all.setdefault("courtlistener", {})
+                tokens = list(existing) + [raw]
+                cfg_all["courtlistener"]["api_tokens"] = tokens
+                cfg_all["courtlistener"].pop("api_token", None)
+                with open(cfg_path, "w", encoding="utf-8") as fh:
+                    yaml.safe_dump(cfg_all, fh, default_flow_style=False)
+            except Exception as exc:
+                self.write_to_engine_log(f"[WARN] Could not persist token to config.yaml: {exc}\n")
+            # Add a new row to the scroll list
+            masked = f"...{raw[-8:]}" if len(raw) > 8 else raw
+            row = ttk.Frame(inner, padding=(8, 4))
+            row.pack(fill=tk.X, pady=2)
+            var = tk.BooleanVar(value=True)
+            status_lbl = ttk.Label(row, text="● ACTIVE", foreground="#2ecc71", font=("Segoe UI", 9))
+
+            def _make_refresh(v=var, lbl=status_lbl, t=raw):
+                def _refresh():
+                    TOKEN_REGISTRY[t]["enabled"] = v.get()
+                    lbl.config(
+                        text="● ACTIVE" if v.get() else "○ DISABLED",
+                        foreground="#2ecc71" if v.get() else "#aaaaaa",
+                    )
+                    status = "ONLINE" if v.get() else "OFFLINE"
+                    self.write_to_engine_log(f"[SYSTEM] Token ending in ...{t[-6:]} toggled {status}.\n")
+                return _refresh
+
+            ttk.Checkbutton(row, text=f"Key:  {masked}", variable=var,
+                            command=_make_refresh(), width=30).pack(side=tk.LEFT)
+            status_lbl.pack(side=tk.LEFT, padx=8)
+            new_key_var.set("")
+            self.write_to_engine_log(f"[SYSTEM] New token ending in ...{raw[-6:]} added.\n")
+            messagebox.showinfo("Token Added", f"Token ...{raw[-8:]} added and saved to config.yaml.", parent=win)
+
+        ttk.Button(add_frame, text="Add Key", command=_add_key).pack(side=tk.LEFT, padx=(4, 8), pady=8)
+
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=12, pady=8)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 12))
+
+    def import_local_legal_files(self):
+        """Copies pre-downloaded .txt legal files from a user-chosen folder into pull_folder
+        so the existing watcher pipeline can process them immediately."""
+        src_dir = filedialog.askdirectory(
+            title="Select folder containing pre-downloaded legal .txt files",
+            parent=self.root,
+        )
+        if not src_dir:
+            return
+
+        src_path = Path(src_dir)
+        txt_files = list(src_path.glob("*.txt"))
+        if not txt_files:
+            messagebox.showinfo(
+                "No Files Found",
+                f"No .txt files were found in:\n{src_dir}",
+                parent=self.root,
+            )
+            return
+
+        try:
+            cfg = cfgmod.load_config()
+            pull_folder = Path(cfg["pull_folder"])
+            pull_folder.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("Configuration Error", f"Could not read pull_folder from config.yaml:\n{exc}", parent=self.root)
+            return
+
+        copied = 0
+        skipped = 0
+        for src_file in txt_files:
+            dest = pull_folder / src_file.name
+            if dest.exists():
+                skipped += 1
+                continue
+            shutil.copy2(src_file, dest)
+            # Copy any existing sidecar as well
+            sidecar_src = src_path / (src_file.name + ".meta.json")
+            if sidecar_src.exists():
+                shutil.copy2(sidecar_src, pull_folder / sidecar_src.name)
+            copied += 1
+
+        self.write_to_engine_log(
+            f"[IMPORT] Copied {copied} file(s) to pull_folder ({skipped} skipped — already present). "
+            f"Start the crawler to process them.\n"
+        )
+        messagebox.showinfo(
+            "Import Complete",
+            f"Copied {copied} file(s) into pull_folder.\n"
+            f"{skipped} file(s) skipped (already present).\n\n"
+            "Press 'Start Crawler' to process the imported files.",
+            parent=self.root,
+        )
 
     def sync_database(self):
         """Queries database stats and triggers visual synchronization loops."""

@@ -34,6 +34,27 @@ llm:
   min_sources: 1
   timeout_seconds: 60
 
+# === Structured Hierarchical ID (Barcode) ===
+# Every ingested document gets a structured ID of the form:
+#   LS-{CT}-{JR}-{SM}-{YR}-{SQ}
+# e.g. LS-CA-CA9-CIV-2019-000042  (9th Cir. / civil rights / 2019)
+#
+# strategy options:
+#   "rules"             Pure regex/gazetteer — fast, always available, no LLM.
+#   "llm"               Ask the fast LLM model — richer subject classification.
+#   "llm_with_fallback" Try LLM first, fall back to rules on any error (default).
+#
+# llm_model / llm_base_url override the main LLM settings for barcode generation.
+# Leave blank to reuse the main llm.fast_model / llm.base_url.
+# llm_timeout_seconds: how long to wait for the classification call (default 20s).
+barcode:
+  enabled: true
+  strategy: "llm_with_fallback"
+  llm_model: ""          # e.g. "llama3" or "mistral" for a local Ollama model
+  llm_base_url: ""       # e.g. "http://localhost:11434/v1"  (blank = use llm.base_url)
+  llm_timeout_seconds: 20
+  confirm_threshold: 0.85  # auto-set barcode_confirmed=1 when confidence >= this
+
 auth:
   enabled: false
   api_keys: []
