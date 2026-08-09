@@ -83,10 +83,38 @@ class WebAppAuthTests(unittest.TestCase):
             body = resp.json()
             self.assertEqual(body["subsequent_history"][0]["doc_id"], later)
             self.assertEqual(body["subsequent_history"][0]["treatment"], "overruled")
+            self.assertIn("full_text", body)
+            self.assertIn("410 U.S. 113", body["full_text"])
 
             hist = self.client.get(f"/api/case/{earlier}/subsequent_history", headers={"X-API-Key": "reader-key"})
             self.assertEqual(hist.status_code, 200)
             self.assertEqual(hist.json()["results"][0]["doc_id"], later)
+
+    def test_ask_endpoint_preserves_source_workspace_fields(self):
+        mocked_sources = [
+            {
+                "doc_id": "doc-1",
+                "ref_no": "LC-000001",
+                "virtual_folder": "Jurisdiction_CA/Constitutional",
+                "source_url": "https://example.com/source",
+                "source_preview": "preview text",
+                "source_text": "full source text",
+                "citations": ["410 U.S. 113 (1973)"],
+                "subsequent_history": [],
+            }
+        ]
+        with patch.object(web_app, "_cfg", return_value=self.cfg), \
+             patch.object(web_app, "_db_path", return_value=str(self.db_path)), \
+             patch("src.legal_ai.query_cases", return_value=("grounded answer [SOURCE 1]", mocked_sources)):
+            resp = self.client.post(
+                "/api/ask",
+                headers={"X-API-Key": "reader-key"},
+                json={"question": "What is the holding?", "top_k": 5},
+            )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["sources"][0]["source_text"], "full source text")
+        self.assertEqual(body["sources"][0]["citations"][0], "410 U.S. 113 (1973)")
 
 
 if __name__ == "__main__":

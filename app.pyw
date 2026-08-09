@@ -17,6 +17,7 @@ from similarity_service import build_and_cache_index, get_similar_cases
 from src.legal_fetch import CourtListenerClient
 from src.study_assistant import generate_study_response, NO_DOCS_SENTINEL, NO_MATCH_SENTINEL
 from src.legal_ai import query_cases, analyze_case, semantic_search
+from src.database import DB
 from src.setup_wizard import is_first_run, run_gui_wizard
 
 # Import the window class from the new file you just created
@@ -392,6 +393,106 @@ class LegalSorterApp:
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
         win.focus_set()
+
+    def _load_case_workspace_payload(self, doc_id: str) -> dict | None:
+        if not self.db_path or not os.path.exists(self.db_path):
+            return None
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                """SELECT id, ref_no, source_url, text, entities_json, citations_json
+                   FROM documents WHERE id = ?""",
+                (doc_id,),
+            ).fetchone()
+        if not row:
+            return None
+        ref_no = row[1] or row[0][:12]
+        source_url = row[2] or ""
+        text = row[3] or ""
+        try:
+            entities = json.loads(row[4]) if row[4] else {}
+            if not isinstance(entities, dict):
+                entities = {}
+        except Exception:
+            entities = {}
+        try:
+            citations = json.loads(row[5]) if row[5] else []
+            if not isinstance(citations, list):
+                citations = []
+        except Exception:
+            citations = []
+        db = DB(self.db_path)
+        try:
+            history = db.get_subsequent_history(doc_id, limit=30)
+        finally:
+            db.conn.close()
+        return {
+            "title": ref_no,
+            "source_url": source_url,
+            "text": text,
+            "ruling_logic": entities.get("RULING_LOGIC") or "No explicit ruling logic extracted.",
+            "citations": citations,
+            "history": history,
+        }
+
+    def _open_case_workspace_windows(self, doc_id: str):
+        payload = self._load_case_workspace_payload(doc_id)
+        if not payload:
+            messagebox.showerror("Case Workspace", "Unable to load case details for workspace windows.")
+            return
+        title = payload["title"]
+        citations_text = "\n".join(f"• {c}" for c in payload["citations"]) if payload["citations"] else "No citations extracted."
+        history = payload["history"] or []
+        negative = [h for h in history if (h.get("treatment") or "").lower() in {"overruled", "criticized", "limited"}]
+        other = [h for h in history if h not in negative]
+        neg_text = "\n".join(
+            f"• {(h.get('ref_no') or (h.get('doc_id', '')[:12] + '…'))} | {h.get('year') or 'year?'} | {h.get('treatment') or 'cited'}\n"
+            f"  {(h.get('context') or '').strip()[:260]}"
+            for h in negative
+        ) if negative else "None."
+        other_text = "\n".join(
+            f"• {(h.get('ref_no') or (h.get('doc_id', '')[:12] + '…'))} | {h.get('year') or 'year?'} | {h.get('treatment') or 'cited'}"
+            for h in other[:20]
+        ) if other else "None."
+        history_text = (
+            "NEGATIVE / OVERTURNING TREATMENT\n"
+            "--------------------------------\n"
+            f"{neg_text}\n\n"
+            "OTHER SUBSEQUENT HISTORY\n"
+            "------------------------\n"
+            f"{other_text}"
+        )
+        self._show_case_viewer(f"{title} — Case Text", payload["text"] or "No case text available.", payload["source_url"])
+        self._show_case_viewer(f"{title} — Citations", citations_text, payload["source_url"])
+        self._show_case_viewer(f"{title} — Rulings", str(payload["ruling_logic"]), payload["source_url"])
+        self._show_case_viewer(f"{title} — Overturned / History", history_text, payload["source_url"])
+
+    def _open_llm_workspace_windows(self, question: str, answer: str, sources: list[dict]):
+        answer_text = f"QUESTION\n--------\n{question}\n\nANSWER\n------\n{answer}"
+        sources_text = "\n\n".join(
+            [
+                (
+                    f"[{idx}] {(s.get('ref_no') or (s.get('doc_id', '')[:12] + '…'))}\n"
+                    f"Folder: {s.get('virtual_folder') or 'Uncategorized'}\n"
+                    f"URL: {s.get('source_url') or 'N/A'}\n"
+                    f"Score: {s.get('retrieval_score')}"
+                )
+                for idx, s in enumerate(sources, 1)
+            ]
+        ) if sources else "No sources returned."
+        full_sources_text = "\n\n".join(
+            [
+                (
+                    f"[SOURCE {idx}] {(s.get('ref_no') or (s.get('doc_id', '')[:12] + '…'))}\n"
+                    f"Citations: {', '.join(s.get('citations') or []) or 'None'}\n"
+                    "------------------------------------------------------------\n"
+                    f"{(s.get('source_text') or s.get('source_preview') or '').strip() or 'No source text available.'}"
+                )
+                for idx, s in enumerate(sources, 1)
+            ]
+        ) if sources else "No source text available."
+        self._show_case_viewer("LLM — Answer", answer_text)
+        self._show_case_viewer("LLM — Sources", sources_text)
+        self._show_case_viewer("LLM — Full Source Text", full_sources_text)
 
     def open_case_and_repull(self, doc_id: str):
         """
@@ -1182,6 +1283,7 @@ class LegalSorterApp:
                     if url:
                         line += f"\n    {url}"
                     self._ai_append(line + "\n", "source")
+            self.root.after(0, lambda: self._open_llm_workspace_windows(question, answer, sources))
             self._ai_set_status(f"✅ Done — {len(sources)} source(s) cited.")
         except Exception as exc:
             self._ai_append(f"\n❌ Error: {exc}\n", "error")
@@ -2451,11 +2553,10 @@ class LegalSorterApp:
             vals = self.case_tree.item(item, "values")
             doc_id = vals[0] if vals else item
 
+            self._open_case_workspace_windows(doc_id)
             ok, result = self.open_case_and_repull(doc_id)
             if not ok:
                 messagebox.showerror("Open case", result)
-            else:
-                messagebox.showinfo("Open case", f"Opened temporary copy: {result}")
         except Exception as e:
             messagebox.showerror("Open case", f"Unexpected error: {e}")
 

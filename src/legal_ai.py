@@ -490,6 +490,9 @@ def query_cases(
             "virtual_folder": r.virtual_folder,
             "source_url": r.source_url,
             "retrieval_score": _score(r, set(_tokenize(question))),
+            "source_preview": (r.text or "")[:2000],
+            "source_text": r.text or "",
+            "citations": r.citations,
             "subsequent_history": _load_subsequent_history(db_path, r.doc_id, limit=3),
         }
         for r in top
