@@ -66,6 +66,16 @@ def main():
             result = load_demo_data()
             print(json.dumps(result, indent=2))
             sys.exit(0)
+        elif args and args[0] == "rebuild-citations":
+            cfgmod._CONFIG_CACHE = {}
+            cfg = cfgmod.load_config()
+            db = DB(str(Path(cfg["index_folder"]) / "legal_sorter.db"))
+            try:
+                result = db.rebuild_citation_relationships()
+            finally:
+                db.conn.close()
+            print(json.dumps(result, indent=2))
+            sys.exit(0)
         elif args and args[0] == "readiness":
             print("[Command] Running strict production-readiness check...")
             sys.exit(run_health_check(strict=True))
