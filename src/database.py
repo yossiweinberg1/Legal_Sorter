@@ -2,6 +2,8 @@ import sqlite3
 import json
 from pathlib import Path
 
+from .citation_history import normalize_citation
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
@@ -40,6 +42,17 @@ CREATE TABLE IF NOT EXISTS cross_references (
     PRIMARY KEY (from_doc_id, to_doc_id, citation)
 );
 
+CREATE TABLE IF NOT EXISTS citation_relationships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_doc_id TEXT NOT NULL,
+    to_doc_id TEXT,
+    citation TEXT NOT NULL,
+    citation_key TEXT,
+    treatment TEXT DEFAULT 'cited',
+    context_snippet TEXT DEFAULT '',
+    UNIQUE (from_doc_id, citation_key, citation)
+);
+
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
     job_id TEXT PRIMARY KEY,
     source_path TEXT,
@@ -76,6 +89,10 @@ CREATE INDEX IF NOT EXISTS idx_priority_queue_status ON priority_queue (status);
 CREATE INDEX IF NOT EXISTS idx_documents_source_url ON documents (source_url);
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_state ON ingestion_jobs (state, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_doc_id ON ingestion_jobs (doc_id);
+CREATE INDEX IF NOT EXISTS idx_citation_relationships_from_doc ON citation_relationships (from_doc_id);
+CREATE INDEX IF NOT EXISTS idx_citation_relationships_to_doc ON citation_relationships (to_doc_id);
+CREATE INDEX IF NOT EXISTS idx_citation_relationships_key ON citation_relationships (citation_key);
+CREATE INDEX IF NOT EXISTS idx_citation_relationships_treatment ON citation_relationships (treatment);
 """
 
 FTS_SETUP = """
@@ -183,6 +200,32 @@ class DB:
             self.conn.commit()
         except Exception:
             pass
+
+        for col_def in [
+            "citation_key TEXT",
+            "treatment TEXT DEFAULT 'cited'",
+            "context_snippet TEXT DEFAULT ''",
+        ]:
+            try:
+                self.conn.execute(f"ALTER TABLE citation_relationships ADD COLUMN {col_def}")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+        try:
+            self.conn.execute("ALTER TABLE citation_index ADD COLUMN citation_key TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_citation_index_key ON citation_index (citation_key)"
+            )
+            self.conn.commit()
+        except Exception:
+            pass
+
+        self._backfill_citation_index_keys()
 
         self._backfill_barcodes()
 
@@ -517,33 +560,244 @@ class DB:
 
     # ---------- cross-referencing ----------
     def register_self_citation(self, citation: str, doc_id: str):
+        citation_key = normalize_citation(citation)
         self.conn.execute(
-            "INSERT OR IGNORE INTO citation_index (citation, doc_id) VALUES (?, ?)",
-            (citation, doc_id),
+            """INSERT OR IGNORE INTO citation_index (citation, doc_id, citation_key)
+               VALUES (?, ?, ?)""",
+            (citation, doc_id, citation_key),
         )
         self.conn.commit()
+        if citation_key:
+            self.resolve_pending_citation_relationships(doc_id, citation, citation_key)
 
     def lookup_citation(self, citation: str) -> str | None:
         row = self.conn.execute(
             "SELECT doc_id FROM citation_index WHERE citation=?", (citation,)
         ).fetchone()
+        if row:
+            return row[0]
+        citation_key = normalize_citation(citation)
+        if not citation_key:
+            return None
+        row = self.conn.execute(
+            "SELECT doc_id FROM citation_index WHERE citation_key=? ORDER BY rowid DESC LIMIT 1",
+            (citation_key,),
+        ).fetchone()
         return row[0] if row else None
 
-    def add_cross_reference(self, from_doc_id: str, to_doc_id: str, citation: str):
+    def add_cross_reference(
+        self,
+        from_doc_id: str,
+        to_doc_id: str | None,
+        citation: str,
+        *,
+        treatment: str = "cited",
+        context_snippet: str = "",
+        citation_key: str | None = None,
+    ):
+        citation_key = citation_key or normalize_citation(citation)
         self.conn.execute(
-            "INSERT OR IGNORE INTO cross_references (from_doc_id, to_doc_id, citation) VALUES (?, ?, ?)",
-            (from_doc_id, to_doc_id, citation),
+            """INSERT INTO citation_relationships
+               (from_doc_id, to_doc_id, citation, citation_key, treatment, context_snippet)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(from_doc_id, citation_key, citation) DO UPDATE SET
+                 to_doc_id=excluded.to_doc_id,
+                 treatment=excluded.treatment,
+                 context_snippet=excluded.context_snippet""",
+            (from_doc_id, to_doc_id, citation, citation_key, treatment, context_snippet[:280]),
+        )
+        if to_doc_id:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO cross_references (from_doc_id, to_doc_id, citation) VALUES (?, ?, ?)",
+                (from_doc_id, to_doc_id, citation),
+            )
+        self.conn.execute(
+            "DELETE FROM cross_references WHERE from_doc_id=? AND citation=? AND (to_doc_id IS NULL OR to_doc_id!=?)",
+            (from_doc_id, citation, to_doc_id or ""),
         )
         self.conn.commit()
 
     def get_cross_references(self, doc_id: str) -> list[dict]:
         rows = self.conn.execute(
-            """SELECT cr.to_doc_id, d.ref_no, cr.citation FROM cross_references cr
+            """SELECT cr.to_doc_id, d.ref_no, cr.citation, d.barcode, d.entities_json
+               FROM citation_relationships cr
                JOIN documents d ON d.id = cr.to_doc_id
-               WHERE cr.from_doc_id=?""",
+               WHERE cr.from_doc_id=? AND cr.to_doc_id IS NOT NULL
+               ORDER BY d.added_at DESC""",
             (doc_id,),
         ).fetchall()
-        return [{"doc_id": r[0], "ref_no": r[1], "citation": r[2]} for r in rows]
+        return [
+            {
+                "doc_id": r[0],
+                "ref_no": r[1],
+                "citation": r[2],
+                "barcode": r[3],
+                "year": self._derive_case_year(r[3], r[4]),
+            }
+            for r in rows
+        ]
+
+    def get_subsequent_history(self, doc_id: str, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT cr.from_doc_id, d.ref_no, d.barcode, d.entities_json,
+                      cr.citation, cr.treatment, cr.context_snippet
+               FROM citation_relationships cr
+               JOIN documents d ON d.id = cr.from_doc_id
+               WHERE cr.to_doc_id = ?
+               ORDER BY
+                 CASE cr.treatment
+                   WHEN 'overruled' THEN 0
+                   WHEN 'criticized' THEN 1
+                   WHEN 'limited' THEN 2
+                   WHEN 'distinguished' THEN 3
+                   WHEN 'followed' THEN 4
+                   WHEN 'cited' THEN 5
+                   ELSE 6
+                 END,
+                 d.added_at DESC
+               LIMIT ?""",
+            (doc_id, limit),
+        ).fetchall()
+        return [
+            {
+                "doc_id": r[0],
+                "ref_no": r[1],
+                "barcode": r[2],
+                "year": self._derive_case_year(r[2], r[3]),
+                "citation": r[4],
+                "treatment": r[5] or "cited",
+                "context": r[6] or "",
+            }
+            for r in rows
+        ]
+
+    def get_subsequent_history_summary(self, doc_id: str, limit: int = 3) -> dict:
+        items = self.get_subsequent_history(doc_id, limit=limit)
+        negative_count = self.conn.execute(
+            """SELECT COUNT(*) FROM citation_relationships
+               WHERE to_doc_id = ? AND treatment IN ('overruled', 'criticized', 'limited')""",
+            (doc_id,),
+        ).fetchone()[0]
+        total_count = self.conn.execute(
+            "SELECT COUNT(*) FROM citation_relationships WHERE to_doc_id = ?",
+            (doc_id,),
+        ).fetchone()[0]
+        return {
+            "count": int(total_count or 0),
+            "negative_treatment_count": int(negative_count or 0),
+            "items": items,
+        }
+
+    def clear_citation_relationships_for_doc(self, doc_id: str) -> None:
+        self.conn.execute("DELETE FROM citation_relationships WHERE from_doc_id = ?", (doc_id,))
+        self.conn.execute("DELETE FROM cross_references WHERE from_doc_id = ?", (doc_id,))
+        self.conn.commit()
+
+    def resolve_pending_citation_relationships(
+        self,
+        target_doc_id: str,
+        citation: str,
+        citation_key: str | None = None,
+    ) -> int:
+        citation_key = citation_key or normalize_citation(citation)
+        if not citation_key:
+            return 0
+        cur = self.conn.execute(
+            """UPDATE citation_relationships
+               SET to_doc_id = ?
+               WHERE citation_key = ? AND (to_doc_id IS NULL OR to_doc_id = '') AND from_doc_id != ?""",
+            (target_doc_id, citation_key, target_doc_id),
+        )
+        self.conn.execute(
+            """INSERT OR IGNORE INTO cross_references (from_doc_id, to_doc_id, citation)
+               SELECT from_doc_id, ?, citation
+               FROM citation_relationships
+               WHERE citation_key = ? AND to_doc_id = ? AND from_doc_id != ?""",
+            (target_doc_id, citation_key, target_doc_id, target_doc_id),
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
+    def rebuild_citation_relationships(self) -> dict:
+        from . import tagger
+        from .citation_history import extract_citation_relationships
+
+        rows = self.conn.execute(
+            "SELECT id, text, citations_json FROM documents ORDER BY added_at"
+        ).fetchall()
+        self.conn.execute("DELETE FROM citation_relationships")
+        self.conn.execute("DELETE FROM cross_references")
+        self.conn.execute("DELETE FROM citation_index")
+        self.conn.commit()
+
+        indexed = 0
+        relationships = 0
+        unresolved = 0
+        prepared: list[tuple[str, str, list[str], str | None]] = []
+        for doc_id, text, citations_raw in rows:
+            try:
+                citations = json.loads(citations_raw) if citations_raw else []
+            except Exception:
+                citations = []
+            self_citation = tagger.extract_self_citation(text or "", citations)
+            if self_citation:
+                self.register_self_citation(self_citation, doc_id)
+                indexed += 1
+            prepared.append((doc_id, text or "", citations, self_citation))
+
+        for doc_id, text, citations, self_citation in prepared:
+            for rel in extract_citation_relationships(text, citations, self_citation=self_citation):
+                to_doc_id = self.lookup_citation(rel["citation"])
+                self.add_cross_reference(
+                    doc_id,
+                    to_doc_id,
+                    rel["citation"],
+                    treatment=rel["treatment"],
+                    context_snippet=rel["context"],
+                    citation_key=rel["citation_key"],
+                )
+                relationships += 1
+                if not to_doc_id:
+                    unresolved += 1
+        return {
+            "documents": len(rows),
+            "self_citations_indexed": indexed,
+            "relationships": relationships,
+            "unresolved": unresolved,
+        }
+
+    def _backfill_citation_index_keys(self) -> None:
+        rows = self.conn.execute(
+            "SELECT citation, doc_id, citation_key FROM citation_index"
+        ).fetchall()
+        updated = False
+        for citation, doc_id, citation_key in rows:
+            normalized = normalize_citation(citation)
+            if normalized and citation_key != normalized:
+                self.conn.execute(
+                    "UPDATE citation_index SET citation_key=? WHERE citation=? AND doc_id=?",
+                    (normalized, citation, doc_id),
+                )
+                updated = True
+        if updated:
+            self.conn.commit()
+
+    @staticmethod
+    def _derive_case_year(barcode: str | None, entities_json: str | None) -> str | None:
+        parts = (barcode or "").split("-", 5)
+        if len(parts) == 6 and parts[4].isdigit() and parts[4] != "0000":
+            return parts[4]
+        try:
+            entities = json.loads(entities_json) if entities_json else {}
+        except Exception:
+            entities = {}
+        dates = entities.get("DATE") if isinstance(entities, dict) else None
+        if isinstance(dates, list):
+            for raw in dates:
+                for token in str(raw).split():
+                    if token.isdigit() and len(token) == 4:
+                        return token
+        return None
 
     # ---------- full-text search (FTS5) ----------
     def fts_search(self, query: str, limit: int = 50) -> list[dict]:

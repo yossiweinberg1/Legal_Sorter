@@ -109,6 +109,7 @@ class _CaseRow:
     barcode_confidence: float | None = None
     keywords: list[str] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
+    subsequent_history: list[dict] = field(default_factory=list)
 
 
 _MAX_LOAD = 2000  # max rows scanned for keyword ranking
@@ -211,6 +212,7 @@ def _load_one(db_path: str, doc_id: str) -> _CaseRow | None:
                 citations=_safe_json(r[6], []),
                 barcode=r[7],
                 barcode_confidence=r[8],
+                subsequent_history=_load_subsequent_history(db_path, r[0], limit=5),
             )
     except Exception as exc:
         log.warning("DB load_one failed: %s", exc)
@@ -250,6 +252,38 @@ def _safe_json(raw: Any, fallback: Any) -> Any:
         return json.loads(raw) if raw else fallback
     except Exception:
         return fallback
+
+
+def _load_subsequent_history(db_path: str, doc_id: str, limit: int = 5) -> list[dict]:
+    try:
+        from .database import DB
+    except ImportError:
+        from database import DB  # type: ignore
+    db = DB(db_path)
+    try:
+        return db.get_subsequent_history(doc_id, limit=limit)
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
+def _subsequent_history_context(items: list[dict]) -> str:
+    if not items:
+        return "No later citing cases are recorded in the archive."
+    lines = []
+    for item in items[:5]:
+        label = item.get("ref_no") or (item.get("doc_id", "")[:12] + "…")
+        barcode = item.get("barcode") or "no-barcode"
+        year = item.get("year") or "unknown-year"
+        treatment = item.get("treatment") or "cited"
+        context = (item.get("context") or "").strip()
+        line = f"- {label} / {barcode} / {year} / {treatment}"
+        if context:
+            line += f": {context[:180]}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +413,7 @@ def query_cases(
         user_msg = (
             f"CASE: {bc_label}\n"
             f"FOLDER: {r.virtual_folder or 'Uncategorized'}\n\n"
+            f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(_load_subsequent_history(db_path, r.doc_id, limit=4))}\n--- END SUBSEQUENT HISTORY ---\n\n"
             f"--- FULL CASE TEXT ---\n{r.text}\n--- END ---\n\n"
             "Extract the holding, key facts, and citations as instructed."
         )
@@ -438,6 +473,7 @@ def query_cases(
             "virtual_folder": r.virtual_folder,
             "source_url": r.source_url,
             "retrieval_score": _score(r, set(_tokenize(question))),
+            "subsequent_history": _load_subsequent_history(db_path, r.doc_id, limit=3),
         }
         for r in top
     ]
@@ -477,6 +513,7 @@ def analyze_case(
     user_msg = (
         f"CASE: {bc_label}\n"
         f"FOLDER: {row.virtual_folder or 'Uncategorized'}\n\n"
+        f"--- SUBSEQUENT HISTORY ---\n{_subsequent_history_context(row.subsequent_history)}\n--- END SUBSEQUENT HISTORY ---\n\n"
         f"--- FULL CASE TEXT ---\n{row.text}\n--- END ---\n\n"
         f"INSTRUCTION: {instruction}"
     )

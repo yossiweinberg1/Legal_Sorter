@@ -32,20 +32,46 @@ for potentially thousands of cases, not the PDFs themselves.
 
 ---
 
+## Getting Started
+
+### Recommended: guided setup wizard
+For new users, start here:
+
+```bash
+python setup_wizard.py
+```
+
+The wizard:
+- creates or updates the local virtual environment
+- installs dependencies
+- helps you choose working folders
+- optionally stores your CourtListener token
+- optionally configures Ollama or LM Studio
+- runs a health check
+- can load demo data so you can see the system working immediately
+
+You can re-run it later for repair or reconfiguration:
+
+```bash
+python setup_wizard.py --cli
+# or, in the desktop app: Settings → Setup / Repair Wizard
+```
+
 ## Setup
 
 Need the owner/operator version of setup? See `README_OWNER_SETUP.md`.
 
-### 1. Install Python packages
+### 1. Install Python packages (manual / power-user path)
 ```
 pip install -r requirements.txt
 ```
 
-### 1a. One-command local bootstrap (recommended)
+### 1a. One-command local bootstrap
 ```
 python bootstrap_local.py
 ```
 This creates `.venv`, installs dependencies, and runs a local health check.
+If you want the friendlier guided setup flow instead, use `python setup_wizard.py`.
 
 ### 1b. VS Code quick connect
 1. Open your project root (the folder containing `README.md`) in VS Code
@@ -60,6 +86,8 @@ This creates `.venv`, installs dependencies, and runs a local health check.
 ### 2. Edit `config.yaml`
 - `pull_folder`, `index_folder`, `pending_folder` — paths on your internal
   drive. All three stay small; `index_folder` holds just the database.
+- If you used the setup wizard, these are usually written through `.env`
+  overrides automatically, so you may not need to edit them by hand.
 - `keep_if_no_repull_source` — leave `true` (default) unless you're fine
   losing files with no known online source.
 - On Linux/macOS, replace the default Windows-style paths with local absolute paths.

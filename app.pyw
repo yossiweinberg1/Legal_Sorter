@@ -17,6 +17,7 @@ from similarity_service import build_and_cache_index, get_similar_cases
 from src.legal_fetch import CourtListenerClient
 from src.study_assistant import generate_study_response, NO_DOCS_SENTINEL, NO_MATCH_SENTINEL
 from src.legal_ai import query_cases, analyze_case, semantic_search
+from src.setup_wizard import is_first_run, run_gui_wizard
 
 # Import the window class from the new file you just created
 from error_ledger import ErrorLedgerWindow
@@ -129,6 +130,7 @@ class LegalSorterApp:
         
         # Discover and link the live DB file location
         self.discover_database_path()
+        self.run_setup_wizard_if_needed()
         
         # Initialize UI Layout and Automation Hooks
         self.build_ui()
@@ -181,6 +183,7 @@ class LegalSorterApp:
 
         settings_menu = tk.Menu(menubar, tearoff=0)
         settings_menu.add_command(label="⚙️ API Key Manager", command=self.open_api_key_manager)
+        settings_menu.add_command(label="🧰 Setup / Repair Wizard", command=self.open_setup_wizard)
         settings_menu.add_command(label="🖥️ Create Desktop Shortcut", command=self._create_desktop_shortcut)
         settings_menu.add_separator()
         settings_menu.add_command(label="Toggle Log Auto-scroll",
@@ -593,6 +596,20 @@ class LegalSorterApp:
             self.db_path = os.path.abspath(os.path.join("index", "legal_sorter.db"))
         if not os.path.exists(self.db_path):
             self.db_path = os.path.abspath("legal_sorter.db")
+
+    def run_setup_wizard_if_needed(self):
+        try:
+            if is_first_run():
+                ok = run_gui_wizard(self.root)
+                if ok:
+                    self.discover_database_path()
+        except Exception:
+            pass
+
+    def open_setup_wizard(self):
+        ok = run_gui_wizard(self.root)
+        if ok:
+            self.discover_database_path()
 
     def _make_text(self, parent, **kw) -> tk.Text:
         """Factory for styled dark Text widgets."""
@@ -1964,6 +1981,11 @@ class LegalSorterApp:
                 keywords = json.loads(keywords_raw) if keywords_raw else []
             except Exception:
                 entities, citations, keywords = {}, [], []
+            db = DB(self.db_path)
+            try:
+                subsequent_history = db.get_subsequent_history(doc_id, limit=10)
+            finally:
+                db.conn.close()
 
             ruling_logic = entities.get("RULING_LOGIC", "No explicit ruling keyword extracted.")
             clean_folder = (virtual_folder or "Uncategorized").replace("\\\\", "/").replace("\\", "/")
@@ -2018,6 +2040,19 @@ class LegalSorterApp:
             brief.append(" DETECTED CROSS-REFERENCE CITATIONS")
             brief.append("-------------------------------------------------------------------------")
             brief.append("\n".join([f" • {c}" for c in citations]) if citations else " None")
+            brief.append("\n-------------------------------------------------------------------------")
+            brief.append(" SUBSEQUENT HISTORY / LATER TREATMENT")
+            brief.append("-------------------------------------------------------------------------")
+            brief.append(
+                "\n".join(
+                    [
+                        f" • {(item.get('ref_no') or item.get('doc_id', '')[:12])} | "
+                        f"{item.get('year') or 'year?'} | {item.get('treatment') or 'cited'}"
+                        for item in subsequent_history
+                    ]
+                )
+                if subsequent_history else " None"
+            )
             brief.append("\n-------------------------------------------------------------------------")
             brief.append(" RAW TEXT ARCHIVE PREVIEW (FIRST 1500 CHARACTERS)")
             brief.append("-------------------------------------------------------------------------")

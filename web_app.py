@@ -113,6 +113,9 @@ def search(
         from src.database import DB
         db = DB(_db_path())
         results = db.fts_search(q.strip(), limit=limit)
+        for item in results:
+            item["subsequent_history"] = db.get_subsequent_history(item["id"], limit=3)
+            item["subsequent_history_count"] = len(db.get_subsequent_history(item["id"], limit=20))
         auditlog.log_event(_cfg(), "api.search", actor=principal["actor"], role=principal["role"], details={"query": q.strip(), "limit": limit, "count": len(results)})
         return {"query": q, "count": len(results), "results": results}
     except Exception as exc:
@@ -123,6 +126,8 @@ def search(
 def get_case(doc_id: str, principal: dict = Depends(require_reader)):
     """Retrieve full metadata and text for a single indexed case."""
     try:
+        from src.database import DB
+        db = DB(_db_path())
         with sqlite3.connect(_db_path()) as conn:
             row = conn.execute(
                 """SELECT id, ref_no, virtual_folder, source_url, file_type,
@@ -159,9 +164,27 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         "barcode_strategy": row[11],
         "barcode_confidence": row[12],
         "barcode_confirmed": bool(row[13]) if row[13] is not None else False,
+        "cited_cases": db.get_cross_references(doc_id),
+        "subsequent_history": db.get_subsequent_history(doc_id, limit=20),
     }
     auditlog.log_event(_cfg(), "api.case", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "ref_no": row[1]})
     return result
+
+
+@app.get("/api/case/{doc_id}/subsequent_history", tags=["Cases"])
+def get_case_subsequent_history(
+    doc_id: str,
+    limit: int = Query(default=20, le=100),
+    principal: dict = Depends(require_reader),
+):
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        items = db.get_subsequent_history(doc_id, limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    auditlog.log_event(_cfg(), "api.case_subsequent_history", actor=principal["actor"], role=principal["role"], details={"doc_id": doc_id, "limit": limit, "count": len(items)})
+    return {"doc_id": doc_id, "count": len(items), "results": items}
 
 
 @app.get("/api/cases", tags=["Cases"])
@@ -173,6 +196,8 @@ def list_cases(
 ):
     """List indexed cases, optionally filtered by virtual folder."""
     try:
+        from src.database import DB
+        db = DB(_db_path())
         with sqlite3.connect(_db_path()) as conn:
             if folder:
                 rows = conn.execute(
@@ -204,6 +229,7 @@ def list_cases(
                 "added_at": r[4],
                 "barcode": r[5],
                 "barcode_confidence": r[6],
+                "subsequent_history": db.get_subsequent_history(r[0], limit=3),
             }
             for r in rows
         ],
@@ -965,11 +991,15 @@ function resultCard(item) {
   const folder  = escapeHtml(item.virtual_folder || 'Uncategorized');
   const snippet = escapeHtml(item.snippet || '');
   const src     = safeSourceLink(item.source_url) || '<span class="muted">No source URL</span>';
+  const history = (item.subsequent_history || []).map(h =>
+    `<li>${escapeHtml(h.ref_no || (h.doc_id || '').slice(0,12) || '?')} · ${escapeHtml(h.year || 'year?')} · ${escapeHtml(h.treatment || 'cited')}</li>`
+  ).join('');
   return `
     <div class="result-item">
       <div class="ref">${ref}</div>
       <div class="meta">📁 ${folder}</div>
       <div class="snip">${snippet}</div>
+      ${history ? `<div class="meta"><strong>Subsequent history</strong><ul style="margin:4px 0">${history}</ul></div>` : ''}
       <div class="meta">${src}</div>
     </div>`;
 }
@@ -1049,6 +1079,7 @@ async function loadRecentCases() {
             <div class="ref">${escapeHtml(c.ref_no||'N/A')}</div>
             <div class="meta">📁 ${escapeHtml(c.virtual_folder||'Uncategorized')}</div>
             <div class="meta">${escapeHtml(c.added_at||'')}</div>
+            ${((c.subsequent_history||[]).length) ? `<div class="meta"><strong>Subsequent history</strong>: ${(c.subsequent_history||[]).map(h => `${escapeHtml(h.ref_no || (h.doc_id||'').slice(0,12) || '?')} · ${escapeHtml(h.treatment || 'cited')}`).join('; ')}</div>` : ''}
           </div>`).join('')
       : '<div class="muted">No cases found.</div>';
   } catch(_) { tgt.innerHTML = '<div class="danger">Failed to load case list.</div>'; }

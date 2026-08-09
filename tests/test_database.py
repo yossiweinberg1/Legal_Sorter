@@ -61,6 +61,52 @@ class DatabaseTests(unittest.TestCase):
         jobs = self.db.list_ingestion_jobs(limit=5)
         self.assertEqual(jobs[0]["job_id"], "job-1")
 
+    def test_rebuild_citation_relationships_tracks_subsequent_history(self):
+        earlier = "doc-earlier"
+        later = "doc-later"
+        self.db.insert_document(
+            doc_id=earlier,
+            source_path="/tmp/earlier.txt",
+            file_type="txt",
+            entities={"DATE": ["January 1, 2020"]},
+            citations=["410 U.S. 113 (1973)"],
+            keywords=["constitutional"],
+            text="Smith v. Jones, 410 U.S. 113 (1973). Decided January 1, 2020 by the California Supreme Court.",
+            source_url="demo://earlier",
+            virtual_folder="Jurisdiction_CA/Constitutional",
+        )
+        self.db.assign_ref_no(earlier)
+        self.db.set_barcode(earlier, "LS-SC-US-CON-2020-000001", confidence=1.0)
+
+        self.db.insert_document(
+            doc_id=later,
+            source_path="/tmp/later.txt",
+            file_type="txt",
+            entities={"DATE": ["February 2, 2024"]},
+            citations=["600 U.S. 21 (2024)", "410 U.S. 113 (1973)"],
+            keywords=["constitutional"],
+            text=(
+                "Brown v. Board Follow-On, 600 U.S. 21 (2024). "
+                "The court distinguished 410 U.S. 113 (1973) on narrower facts."
+            ),
+            source_url="demo://later",
+            virtual_folder="Jurisdiction_CA/Constitutional",
+        )
+        self.db.assign_ref_no(later)
+        self.db.set_barcode(later, "LS-CA-CA9-CON-2024-000002", confidence=1.0)
+
+        stats = self.db.rebuild_citation_relationships()
+        self.assertEqual(stats["relationships"], 1)
+
+        outgoing = self.db.get_cross_references(later)
+        self.assertEqual(outgoing[0]["doc_id"], earlier)
+
+        history = self.db.get_subsequent_history(earlier)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["doc_id"], later)
+        self.assertEqual(history[0]["treatment"], "distinguished")
+        self.assertEqual(history[0]["year"], "2024")
+
 
 if __name__ == "__main__":
     unittest.main()
