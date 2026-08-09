@@ -7,13 +7,9 @@ from train import train_llm
 from src.database import connect_sqlite, resolve_db_path
 
 
-def _resolve_db_path() -> str:
-    return resolve_db_path()
-
-
 def harvest_and_train():
     try:
-        db_path = _resolve_db_path()
+        db_path = resolve_db_path()
     except FileNotFoundError as e:
         print(f"❌ {e}")
         return

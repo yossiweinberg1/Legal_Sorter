@@ -187,8 +187,8 @@ class DB:
         # busy_timeout mirrors the Python-level timeout inside SQLite itself.
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
-        self.safe_execute("PRAGMA busy_timeout=30000;")
-        self.safe_execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
+        self.conn.execute("PRAGMA busy_timeout=30000;")
+        self.conn.execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
         self.conn.executescript(SCHEMA)
         self.safe_commit()
 
