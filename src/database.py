@@ -17,7 +17,11 @@ def resolve_db_path(db_path: str | None = None) -> str:
 def connect_sqlite(db_path: str | None = None) -> sqlite3.Connection:
     resolved = resolve_db_path(db_path)
     Path(resolved).parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(resolved, timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(resolved, timeout=30, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
+    return conn
 
 
 def safe_connection_execute(conn: sqlite3.Connection, sql, params=()):

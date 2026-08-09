@@ -75,13 +75,14 @@ def _load_from_db(cfg: dict, barcode_prefix: str | None = None) -> tuple[list[st
                         prefix are loaded.  Uses the B-tree index on barcode.
     """
     index_folder = cfg.get("index_folder", "")
-    db_path = Path(index_folder) / "legal_sorter.db" if index_folder else Path(LEGAL_SORTER_DB_PATH)
+    db_path_str = str(Path(index_folder) / "legal_sorter.db") if index_folder else LEGAL_SORTER_DB_PATH
+    db_path = Path(db_path_str)
 
-    if not db_path or not db_path.exists():
+    if not db_path.exists():
         return [], []
 
     try:
-        with connect_sqlite(str(db_path)) as conn:
+        with connect_sqlite(db_path_str) as conn:
             if barcode_prefix is not None:
                 if "%" in barcode_prefix:
                     # Raw wildcard pattern from barcode_prefix() — use as-is
