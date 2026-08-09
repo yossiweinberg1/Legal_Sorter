@@ -174,7 +174,7 @@ def run_bulk_batch(cfg: dict, db: DB, max_items: int = 100) -> int:
             source_url = f"bulk://{bulk_file}#{opinion_id}"
 
 
-            existing = db.conn.execute(
+            existing = db.safe_execute(
                 "SELECT 1 FROM documents WHERE source_url=?", (source_url,)
             ).fetchone()
             if existing:

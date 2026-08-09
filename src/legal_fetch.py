@@ -134,7 +134,7 @@ class CourtListenerClient:
             source_url = f"https://www.courtlistener.com{abs_url}" if abs_url else download_url
 
             if db and source_url:
-                cursor = db.conn.execute("SELECT 1 FROM documents WHERE source_url = ?", (source_url,))
+                cursor = db.safe_execute("SELECT 1 FROM documents WHERE source_url = ?", (source_url,))
                 if cursor.fetchone():
                     log.info(f"  [-] Skipping: {opinion_id} already indexed.")
                     continue

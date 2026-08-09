@@ -42,7 +42,7 @@ def load_demo_data() -> dict:
     db = DB(str(Path(cfg["index_folder"]) / "legal_sorter.db"))
     try:
         scan_once(cfg, db)
-        total = db.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        total = db.safe_execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     finally:
         db.conn.close()
     return {"loaded": len(_SAMPLES), "total_cases": int(total or 0)}

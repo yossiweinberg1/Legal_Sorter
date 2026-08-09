@@ -1,8 +1,44 @@
-import sqlite3
 import json
+import sqlite3
+import time
 from pathlib import Path
 
 from .citation_history import normalize_citation
+
+LEGAL_SORTER_DB_PATH = r"C:\LegalSorter\index\legal_sorter.db"
+SQLITE_RETRY_ATTEMPTS = 5
+SQLITE_RETRY_SLEEP_SECONDS = 0.15
+
+
+def resolve_db_path(db_path: str | None = None) -> str:
+    return db_path or LEGAL_SORTER_DB_PATH
+
+
+def connect_sqlite(db_path: str | None = None) -> sqlite3.Connection:
+    resolved = resolve_db_path(db_path)
+    Path(resolved).parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(resolved, timeout=30, check_same_thread=False)
+
+
+def safe_connection_execute(conn: sqlite3.Connection, sql, params=()):
+    for attempt in range(SQLITE_RETRY_ATTEMPTS):
+        try:
+            return conn.execute(sql, params)
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower() or attempt == SQLITE_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(SQLITE_RETRY_SLEEP_SECONDS)
+
+
+def safe_connection_commit(conn: sqlite3.Connection):
+    for attempt in range(SQLITE_RETRY_ATTEMPTS):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower() or attempt == SQLITE_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(SQLITE_RETRY_SLEEP_SECONDS)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -122,38 +158,39 @@ END;
 """
 class DB:
     def __init__(self, db_path: str):
+        db_path = resolve_db_path(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         # timeout=30: wait up to 30 s for another writer to release the lock
         # before raising OperationalError, preventing crashes when run.py and
         # bulk_ingest.py both write to the same DB concurrently.
-        self.conn = sqlite3.connect(db_path, timeout=30)
+        self.conn = connect_sqlite(db_path)
         # WAL mode allows readers and writers to coexist without blocking each other.
         # busy_timeout mirrors the Python-level timeout inside SQLite itself.
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=30000")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self.safe_execute("PRAGMA busy_timeout=30000;")
+        self.safe_execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
         self.conn.executescript(SCHEMA)
-        self.conn.commit()
+        self.safe_commit()
 
         # FTS5 virtual table for fast full-text search (created separately to avoid
         # executescript conflicts with triggers that reference other tables)
         try:
             self.conn.executescript(FTS_SETUP)
-            self.conn.commit()
+            self.safe_commit()
         except Exception:
             pass  # FTS already exists or SQLite build lacks FTS5 — degrade gracefully
         try:
-            self.conn.execute("ALTER TABLE documents ADD COLUMN ref_no TEXT")
-            self.conn.commit()
+            self.safe_execute("ALTER TABLE documents ADD COLUMN ref_no TEXT")
+            self.safe_commit()
         except sqlite3.OperationalError:
             pass  # column already exists
 
         # --- SAFE BOOKMARK & USER FOLDER MIGRATION SCRIPT ---
         try:
-            self.conn.execute("ALTER TABLE documents ADD COLUMN is_bookmarked INTEGER DEFAULT 0")
-            self.conn.execute("ALTER TABLE documents ADD COLUMN user_folder TEXT")
-            self.conn.commit()
+            self.safe_execute("ALTER TABLE documents ADD COLUMN is_bookmarked INTEGER DEFAULT 0")
+            self.safe_execute("ALTER TABLE documents ADD COLUMN user_folder TEXT")
+            self.safe_commit()
         except sqlite3.OperationalError:
             pass  # columns already exist
 
@@ -166,15 +203,15 @@ class DB:
         ]:
             col_name = col_def.split()[0]
             try:
-                self.conn.execute(f"ALTER TABLE documents ADD COLUMN {col_def}")
-                self.conn.commit()
+                self.safe_execute(f"ALTER TABLE documents ADD COLUMN {col_def}")
+                self.safe_commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
 
         # Ensure ref_no has an index for fast UI lookups
         try:
-            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_ref_no ON documents (ref_no)")
-            self.conn.commit()
+            self.safe_execute("CREATE INDEX IF NOT EXISTS idx_documents_ref_no ON documents (ref_no)")
+            self.safe_commit()
         except Exception:
             pass
 
@@ -192,17 +229,17 @@ class DB:
             "barcode_confidence REAL DEFAULT 0.0",
         ]:
             try:
-                self.conn.execute(f"ALTER TABLE documents ADD COLUMN {col_def}")
-                self.conn.commit()
+                self.safe_execute(f"ALTER TABLE documents ADD COLUMN {col_def}")
+                self.safe_commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
 
         # B-tree index on barcode for fast prefix scans (WHERE barcode LIKE 'LS-CA-%')
         try:
-            self.conn.execute(
+            self.safe_execute(
                 "CREATE INDEX IF NOT EXISTS idx_documents_barcode ON documents (barcode)"
             )
-            self.conn.commit()
+            self.safe_commit()
         except Exception:
             pass
 
@@ -212,21 +249,21 @@ class DB:
             "context_snippet TEXT DEFAULT ''",
         ]:
             try:
-                self.conn.execute(f"ALTER TABLE citation_relationships ADD COLUMN {col_def}")
-                self.conn.commit()
+                self.safe_execute(f"ALTER TABLE citation_relationships ADD COLUMN {col_def}")
+                self.safe_commit()
             except sqlite3.OperationalError:
                 pass
 
         try:
-            self.conn.execute("ALTER TABLE citation_index ADD COLUMN citation_key TEXT")
-            self.conn.commit()
+            self.safe_execute("ALTER TABLE citation_index ADD COLUMN citation_key TEXT")
+            self.safe_commit()
         except sqlite3.OperationalError:
             pass
         try:
-            self.conn.execute(
+            self.safe_execute(
                 "CREATE INDEX IF NOT EXISTS idx_citation_index_key ON citation_index (citation_key)"
             )
-            self.conn.commit()
+            self.safe_commit()
         except Exception:
             pass
 
@@ -234,38 +271,43 @@ class DB:
 
         self._backfill_barcodes()
 
+    def safe_execute(self, sql, params=()):
+        return safe_connection_execute(self.conn, sql, params)
+
+    def safe_commit(self):
+        safe_connection_commit(self.conn)
+
     def add_to_priority_queue(self, citation, status="SYSTEM_SEED"):
-        self.conn.execute(
+        self.safe_execute(
             "INSERT OR IGNORE INTO priority_queue (citation, source_doc_id) VALUES (?, ?)",
             (citation, status)
         )
-        self.conn.commit()
+        self.safe_commit()
 
     def get_next_priority_citation(self):
-        cursor = self.conn.cursor()
         # This filter is the missing link to stop the loop
-        cursor.execute("SELECT citation FROM priority_queue WHERE status IS NULL OR status = 'pending' LIMIT 1")
+        cursor = self.safe_execute("SELECT citation FROM priority_queue WHERE status IS NULL OR status = 'pending' LIMIT 1")
         row = cursor.fetchone()
         return row[0] if row else None
 
     def mark_priority_fetched(self, citation):
-        self.conn.execute("UPDATE priority_queue SET status = 'fetched' WHERE citation = ?", (citation,))
-        self.conn.commit()
+        self.safe_execute("UPDATE priority_queue SET status = 'fetched' WHERE citation = ?", (citation,))
+        self.safe_commit()
 
     def check_citation_indexed(self, citation):
-        cursor = self.conn.execute("SELECT 1 FROM priority_queue WHERE citation = ?", (citation,))
+        cursor = self.safe_execute("SELECT 1 FROM priority_queue WHERE citation = ?", (citation,))
         return cursor.fetchone() is not None
 
     def get_document(self, doc_id):
         """Checks if a document ID already exists in the database."""
-        cursor = self.conn.execute("SELECT id FROM documents WHERE id = ?", (doc_id,))
+        cursor = self.safe_execute("SELECT id FROM documents WHERE id = ?", (doc_id,))
         return cursor.fetchone()
 
     def all_texts_except(self, doc_id):
         """Retrieves up to 200 document text samples (first 8 000 chars each) from the
         database except the active one. Capping both count and length keeps TF-IDF fast
         regardless of archive size while still giving the vectoriser a representative corpus."""
-        cursor = self.conn.execute(
+        cursor = self.safe_execute(
             "SELECT SUBSTR(text, 1, 8000) FROM documents WHERE id != ? AND text IS NOT NULL LIMIT 200",
             (doc_id,)
         )
@@ -277,7 +319,7 @@ class DB:
                         content_source="full_text", sanity_check_passed=1,
                         source_fingerprint=None, document_version=1):
         """Glues together and saves the fully parsed document metadata into the database."""
-        self.conn.execute(
+        self.safe_execute(
             """INSERT OR REPLACE INTO documents 
             (id, source_path, file_type, entities_json, citations_json, keywords_json, text,
              source_url, virtual_folder, content_source, sanity_check_passed,
@@ -290,53 +332,52 @@ class DB:
                 source_fingerprint, document_version,
             )
         )
-        self.conn.commit()
+        self.safe_commit()
 
     def mark_deleted_original(self, doc_id):
         """Flags that the raw local file was cleared because a web backup source is known."""
-        self.conn.execute("UPDATE documents SET deleted_original = 1 WHERE id = ?", (doc_id,))
-        self.conn.commit()
+        self.safe_execute("UPDATE documents SET deleted_original = 1 WHERE id = ?", (doc_id,))
+        self.safe_commit()
 
     def mark_held_no_source(self, doc_id):
         """Flags that the file is safely held locally because no online backup exists."""
-        self.conn.execute("UPDATE documents SET held_no_repull_source = 1 WHERE id = ?", (doc_id,))
-        self.conn.commit()
+        self.safe_execute("UPDATE documents SET held_no_repull_source = 1 WHERE id = ?", (doc_id,))
+        self.safe_commit()
 
     def mark_priority_failed(self, citation: str):
         """Updates the database so this citation is not attempted again."""
-        cursor = self.conn.cursor()
-        cursor.execute("UPDATE priority_queue SET status = 'failed' WHERE citation = ?", (citation,))
-        self.conn.commit()
+        self.safe_execute("UPDATE priority_queue SET status = 'failed' WHERE citation = ?", (citation,))
+        self.safe_commit()
 
 # ---------- reference numbers ----------
     def get_next_ref_no(self) -> str:
-        self.conn.execute("INSERT OR IGNORE INTO ref_counter (id, next_value) VALUES (1, 1)")
-        row = self.conn.execute("SELECT next_value FROM ref_counter WHERE id=1").fetchone()
+        self.safe_execute("INSERT OR IGNORE INTO ref_counter (id, next_value) VALUES (1, 1)")
+        row = self.safe_execute("SELECT next_value FROM ref_counter WHERE id=1").fetchone()
         current = row[0]
-        self.conn.execute("UPDATE ref_counter SET next_value = ? WHERE id=1", (current + 1,))
-        self.conn.commit()
+        self.safe_execute("UPDATE ref_counter SET next_value = ? WHERE id=1", (current + 1,))
+        self.safe_commit()
         return f"LC-{current:06d}"
 
     def _backfill_ref_numbers(self):
         """One-time catch-up: assigns ref numbers to documents indexed
         before this feature existed."""
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             "SELECT id FROM documents WHERE ref_no IS NULL ORDER BY added_at"
         ).fetchall()
         for (doc_id,) in rows:
             ref_no = self.get_next_ref_no()
-            self.conn.execute("UPDATE documents SET ref_no=? WHERE id=?", (ref_no, doc_id))
+            self.safe_execute("UPDATE documents SET ref_no=? WHERE id=?", (ref_no, doc_id))
         if rows:
-            self.conn.commit()
+            self.safe_commit()
 
     def assign_ref_no(self, doc_id: str) -> str:
         ref_no = self.get_next_ref_no()
-        self.conn.execute("UPDATE documents SET ref_no=? WHERE id=?", (ref_no, doc_id))
-        self.conn.commit()
+        self.safe_execute("UPDATE documents SET ref_no=? WHERE id=?", (ref_no, doc_id))
+        self.safe_commit()
         return ref_no
 
     def get_ref_no(self, doc_id: str) -> str | None:
-        row = self.conn.execute("SELECT ref_no FROM documents WHERE id=?", (doc_id,)).fetchone()
+        row = self.safe_execute("SELECT ref_no FROM documents WHERE id=?", (doc_id,)).fetchone()
         return row[0] if row else None
 
 # ---------- structured barcode ----------
@@ -369,7 +410,7 @@ class DB:
         # then query only the collision candidates (exact + A–Z) for this base.
         base_bc = barcode[:-1] if (len(barcode) > 1 and barcode[-1].isupper()) else barcode
         like_pattern = base_bc.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             "SELECT barcode FROM documents WHERE barcode LIKE ? ESCAPE '\\' AND id != ?",
             (like_pattern + "%", doc_id),
         ).fetchall()
@@ -377,19 +418,19 @@ class DB:
         barcode = barcode_mod.resolve_collision(barcode, existing)
 
         confirmed = 1 if confidence >= confirm_threshold else 0
-        self.conn.execute(
+        self.safe_execute(
             """UPDATE documents
                SET barcode=?, barcode_strategy=?, barcode_confidence=?,
                    barcode_confirmed=?
                WHERE id=?""",
             (barcode, strategy, confidence, confirmed, doc_id),
         )
-        self.conn.commit()
+        self.safe_commit()
         return barcode
 
     def get_barcode(self, doc_id: str) -> str | None:
         """Return the barcode for a document, or None if not yet assigned."""
-        row = self.conn.execute(
+        row = self.safe_execute(
             "SELECT barcode FROM documents WHERE id=?", (doc_id,)
         ).fetchone()
         return row[0] if row else None
@@ -400,11 +441,11 @@ class DB:
         Sets barcode_confirmed=1 and barcode_confidence=1.0 so the record is
         excluded from future automatic backfill or regeneration passes.
         """
-        self.conn.execute(
+        self.safe_execute(
             "UPDATE documents SET barcode=?, barcode_confirmed=1, barcode_confidence=1.0 WHERE id=?",
             (barcode, doc_id),
         )
-        self.conn.commit()
+        self.safe_commit()
 
     def _backfill_barcodes(self) -> None:
         """One-time rule-based catch-up: assigns barcodes to documents that
@@ -420,7 +461,7 @@ class DB:
             except ImportError:
                 return  # barcode module not available yet — skip silently
 
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             """SELECT id, ref_no, entities_json, keywords_json, virtual_folder, text
                FROM documents
                WHERE barcode IS NULL AND (barcode_confirmed IS NULL OR barcode_confirmed = 0)
@@ -463,7 +504,7 @@ class DB:
         like_safe = (
             prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             """SELECT id, ref_no, barcode, barcode_strategy, barcode_confidence,
                       virtual_folder, source_url
                FROM documents
@@ -490,7 +531,7 @@ class DB:
 
         Returns a dict with the full document row, or None if not found.
         """
-        row = self.conn.execute(
+        row = self.safe_execute(
             """SELECT id, ref_no, barcode, barcode_strategy, barcode_confirmed,
                       barcode_confidence, virtual_folder, source_url, file_type,
                       keywords_json, citations_json, entities_json, added_at
@@ -547,7 +588,7 @@ class DB:
         if not force:
             base += " AND (barcode_confirmed IS NULL OR barcode_confirmed = 0)"
         base += " ORDER BY added_at"
-        rows = self.conn.execute(base, params).fetchall()
+        rows = self.safe_execute(base, params).fetchall()
         return [
             {
                 "id": r[0],
@@ -566,17 +607,17 @@ class DB:
     # ---------- cross-referencing ----------
     def register_self_citation(self, citation: str, doc_id: str):
         citation_key = normalize_citation(citation)
-        self.conn.execute(
+        self.safe_execute(
             """INSERT OR IGNORE INTO citation_index (citation, doc_id, citation_key)
                VALUES (?, ?, ?)""",
             (citation, doc_id, citation_key),
         )
-        self.conn.commit()
+        self.safe_commit()
         if citation_key:
             self.resolve_pending_citation_relationships(doc_id, citation, citation_key)
 
     def lookup_citation(self, citation: str) -> str | None:
-        row = self.conn.execute(
+        row = self.safe_execute(
             "SELECT doc_id FROM citation_index WHERE citation=?", (citation,)
         ).fetchone()
         if row:
@@ -584,7 +625,7 @@ class DB:
         citation_key = normalize_citation(citation)
         if not citation_key:
             return None
-        row = self.conn.execute(
+        row = self.safe_execute(
             "SELECT doc_id FROM citation_index WHERE citation_key=? ORDER BY rowid DESC LIMIT 1",
             (citation_key,),
         ).fetchone()
@@ -601,7 +642,7 @@ class DB:
         citation_key: str | None = None,
     ):
         citation_key = citation_key or normalize_citation(citation)
-        self.conn.execute(
+        self.safe_execute(
             """INSERT INTO citation_relationships
                (from_doc_id, to_doc_id, citation, citation_key, treatment, context_snippet)
                VALUES (?, ?, ?, ?, ?, ?)
@@ -612,18 +653,18 @@ class DB:
             (from_doc_id, to_doc_id, citation, citation_key, treatment, context_snippet[:280]),
         )
         if to_doc_id:
-            self.conn.execute(
+            self.safe_execute(
                 "INSERT OR IGNORE INTO cross_references (from_doc_id, to_doc_id, citation) VALUES (?, ?, ?)",
                 (from_doc_id, to_doc_id, citation),
             )
-            self.conn.execute(
+            self.safe_execute(
                 "DELETE FROM cross_references WHERE from_doc_id=? AND citation=? AND (to_doc_id IS NULL OR to_doc_id!=?)",
                 (from_doc_id, citation, to_doc_id),
             )
-        self.conn.commit()
+        self.safe_commit()
 
     def get_cross_references(self, doc_id: str) -> list[dict]:
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             """SELECT cr.to_doc_id, d.ref_no, cr.citation, d.barcode, d.entities_json
                FROM citation_relationships cr
                JOIN documents d ON d.id = cr.to_doc_id
@@ -643,7 +684,7 @@ class DB:
         ]
 
     def get_subsequent_history(self, doc_id: str, limit: int = 20) -> list[dict]:
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             """SELECT cr.from_doc_id, d.ref_no, d.barcode, d.entities_json,
                       cr.citation, cr.treatment, cr.context_snippet
                FROM citation_relationships cr
@@ -678,12 +719,12 @@ class DB:
 
     def get_subsequent_history_summary(self, doc_id: str, limit: int = 3) -> dict:
         items = self.get_subsequent_history(doc_id, limit=limit)
-        negative_count = self.conn.execute(
+        negative_count = self.safe_execute(
             """SELECT COUNT(*) FROM citation_relationships
                WHERE to_doc_id = ? AND treatment IN ('overruled', 'criticized', 'limited')""",
             (doc_id,),
         ).fetchone()[0]
-        total_count = self.conn.execute(
+        total_count = self.safe_execute(
             "SELECT COUNT(*) FROM citation_relationships WHERE to_doc_id = ?",
             (doc_id,),
         ).fetchone()[0]
@@ -698,7 +739,7 @@ class DB:
         if not cleaned:
             return {}
         placeholders = ",".join("?" for _ in cleaned)
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             f"""SELECT cr.to_doc_id, cr.from_doc_id, d.ref_no, d.barcode, d.entities_json,
                        cr.citation, cr.treatment, cr.context_snippet
                 FROM citation_relationships cr
@@ -745,9 +786,9 @@ class DB:
         return summary
 
     def clear_citation_relationships_for_doc(self, doc_id: str) -> None:
-        self.conn.execute("DELETE FROM citation_relationships WHERE from_doc_id = ?", (doc_id,))
-        self.conn.execute("DELETE FROM cross_references WHERE from_doc_id = ?", (doc_id,))
-        self.conn.commit()
+        self.safe_execute("DELETE FROM citation_relationships WHERE from_doc_id = ?", (doc_id,))
+        self.safe_execute("DELETE FROM cross_references WHERE from_doc_id = ?", (doc_id,))
+        self.safe_commit()
 
     def resolve_pending_citation_relationships(
         self,
@@ -758,33 +799,33 @@ class DB:
         citation_key = citation_key or normalize_citation(citation)
         if not citation_key:
             return 0
-        cur = self.conn.execute(
+        cur = self.safe_execute(
             """UPDATE citation_relationships
                SET to_doc_id = ?
                WHERE citation_key = ? AND (to_doc_id IS NULL OR to_doc_id = '') AND from_doc_id != ?""",
             (target_doc_id, citation_key, target_doc_id),
         )
-        self.conn.execute(
+        self.safe_execute(
             """INSERT OR IGNORE INTO cross_references (from_doc_id, to_doc_id, citation)
                SELECT from_doc_id, ?, citation
                FROM citation_relationships
                WHERE citation_key = ? AND to_doc_id = ? AND from_doc_id != ?""",
             (target_doc_id, citation_key, target_doc_id, target_doc_id),
         )
-        self.conn.commit()
+        self.safe_commit()
         return int(cur.rowcount or 0)
 
     def rebuild_citation_relationships(self) -> dict:
         from . import tagger
         from .citation_history import extract_citation_relationships
 
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             "SELECT id, text, citations_json FROM documents ORDER BY added_at"
         ).fetchall()
-        self.conn.execute("DELETE FROM citation_relationships")
-        self.conn.execute("DELETE FROM cross_references")
-        self.conn.execute("DELETE FROM citation_index")
-        self.conn.commit()
+        self.safe_execute("DELETE FROM citation_relationships")
+        self.safe_execute("DELETE FROM cross_references")
+        self.safe_execute("DELETE FROM citation_index")
+        self.safe_commit()
 
         indexed = 0
         relationships = 0
@@ -823,20 +864,20 @@ class DB:
         }
 
     def _backfill_citation_index_keys(self) -> None:
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             "SELECT citation, doc_id, citation_key FROM citation_index"
         ).fetchall()
         updated = False
         for citation, doc_id, citation_key in rows:
             normalized = normalize_citation(citation)
             if normalized and citation_key != normalized:
-                self.conn.execute(
+                self.safe_execute(
                     "UPDATE citation_index SET citation_key=? WHERE citation=? AND doc_id=?",
                     (normalized, citation, doc_id),
                 )
                 updated = True
         if updated:
-            self.conn.commit()
+            self.safe_commit()
 
     @staticmethod
     def _derive_case_year(barcode: str | None, entities_json: str | None) -> str | None:
@@ -870,7 +911,7 @@ class DB:
         safe_query = query.replace('"', '""').strip()
 
         try:
-            rows = self.conn.execute(
+            rows = self.safe_execute(
                 """SELECT d.id, d.ref_no, d.virtual_folder, d.source_url,
                           d.barcode, d.barcode_confidence,
                           snippet(documents_fts, 4, '<b>', '</b>', '…', 32) AS snip
@@ -886,7 +927,7 @@ class DB:
             # Escape SQL LIKE special characters in the original query
             like_safe = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             like = f"%{like_safe}%"
-            rows = self.conn.execute(
+            rows = self.safe_execute(
                 """SELECT id, ref_no, virtual_folder, source_url,
                           barcode, barcode_confidence,
                           SUBSTR(text, 1, 300) AS snip
@@ -928,14 +969,14 @@ class DB:
         increment_attempt: bool = False,
     ) -> None:
         current_attempts = 0
-        existing = self.conn.execute(
+        existing = self.safe_execute(
             "SELECT attempts FROM ingestion_jobs WHERE job_id = ?",
             (job_id,),
         ).fetchone()
         if existing:
             current_attempts = int(existing[0] or 0)
         attempts = current_attempts + 1 if increment_attempt else current_attempts
-        self.conn.execute(
+        self.safe_execute(
             """INSERT INTO ingestion_jobs
                (job_id, source_path, source_url, state, doc_id, content_hash,
                 source_fingerprint, source_mtime, attempts, quarantined_path,
@@ -970,10 +1011,10 @@ class DB:
                 error_details,
             ),
         )
-        self.conn.commit()
+        self.safe_commit()
 
     def get_ingestion_job(self, job_id: str) -> dict | None:
-        row = self.conn.execute(
+        row = self.safe_execute(
             """SELECT job_id, source_path, source_url, state, doc_id, content_hash,
                       source_fingerprint, source_mtime, attempts, quarantined_path,
                       error_type, error_details, created_at, updated_at
@@ -999,7 +1040,7 @@ class DB:
             params = (state,)
         query += " ORDER BY updated_at DESC LIMIT ?"
         params = params + (limit,)
-        rows = self.conn.execute(query, params).fetchall()
+        rows = self.safe_execute(query, params).fetchall()
         return [
             {
                 "job_id": r[0],
@@ -1018,16 +1059,16 @@ class DB:
 
     # ---------- backup history ----------
     def record_backup(self, backup_id: str, archive_path: str, verified_ok: bool, details: dict | None = None) -> None:
-        self.conn.execute(
+        self.safe_execute(
             """INSERT OR REPLACE INTO backup_history
                (backup_id, archive_path, verified_ok, details_json, created_at)
                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
             (backup_id, archive_path, 1 if verified_ok else 0, json.dumps(details or {})),
         )
-        self.conn.commit()
+        self.safe_commit()
 
     def list_backups(self, limit: int = 20) -> list[dict]:
-        rows = self.conn.execute(
+        rows = self.safe_execute(
             """SELECT backup_id, archive_path, verified_ok, details_json, created_at
                FROM backup_history ORDER BY created_at DESC LIMIT ?""",
             (limit,),

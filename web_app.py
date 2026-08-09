@@ -18,7 +18,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -29,6 +28,7 @@ from pydantic import BaseModel
 
 from src import config as cfgmod
 from src import audit as auditlog
+from src.database import LEGAL_SORTER_DB_PATH, connect_sqlite
 from src.icon_utils import logo_data_uri
 
 # ---------------------------------------------------------------------------
@@ -45,8 +45,7 @@ log = logging.getLogger(__name__)
 
 
 def _db_path() -> str:
-    cfg = cfgmod.load_config()
-    return str(Path(cfg["index_folder"]) / "legal_sorter.db")
+    return LEGAL_SORTER_DB_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +130,7 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
     try:
         from src.database import DB
         db = DB(_db_path())
-        row = db.conn.execute(
+        row = db.safe_execute(
             """SELECT id, ref_no, virtual_folder, source_url, file_type,
                       entities_json, citations_json, keywords_json,
                       added_at, barcode, barcode_strategy,
@@ -215,7 +214,7 @@ def list_cases(
         db = DB(_db_path())
         try:
             history_map = {}
-            with sqlite3.connect(_db_path()) as conn:
+            with connect_sqlite(_db_path()) as conn:
                 if folder:
                     rows = conn.execute(
                         """SELECT id, ref_no, virtual_folder, source_url, added_at,
@@ -286,7 +285,7 @@ def ask(body: AskRequest, principal: dict = Depends(require_reader)):
 def stats(principal: dict = Depends(require_reader)):
     """Return basic statistics about the indexed archive."""
     try:
-        with sqlite3.connect(_db_path()) as conn:
+        with connect_sqlite(_db_path()) as conn:
             total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
             folders = conn.execute(
                 "SELECT virtual_folder, COUNT(*) FROM documents GROUP BY virtual_folder ORDER BY 2 DESC LIMIT 20"
@@ -354,7 +353,7 @@ def ingest(body: IngestRequest, principal: dict = Depends(require_operator)):
         ingest_url = f"ingest://{content_hash}"
 
         # Check for duplicate before writing anything
-        existing = db.conn.execute(
+        existing = db.safe_execute(
             "SELECT ref_no FROM documents WHERE source_url = ?", (ingest_url,)
         ).fetchone()
         if existing:
@@ -386,7 +385,7 @@ def ingest(body: IngestRequest, principal: dict = Depends(require_operator)):
             watchermod.process_file(tmp_path, cfg, db)
 
             # Retrieve the ref_no that was just assigned via the source_url key
-            row = db.conn.execute(
+            row = db.safe_execute(
                 "SELECT ref_no, virtual_folder FROM documents WHERE source_url = ?", (ingest_url,)
             ).fetchone()
             if row:
@@ -394,7 +393,7 @@ def ingest(body: IngestRequest, principal: dict = Depends(require_operator)):
             else:
                 # Fallback: grab the most-recently inserted row if the
                 # pipeline stored it under a different id
-                row2 = db.conn.execute(
+                row2 = db.safe_execute(
                     "SELECT ref_no, virtual_folder FROM documents ORDER BY rowid DESC LIMIT 1"
                 ).fetchone()
                 stored.append(

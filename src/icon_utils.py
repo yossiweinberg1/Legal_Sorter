@@ -9,6 +9,9 @@ import zlib
 from functools import lru_cache
 from pathlib import Path
 
+APP_ROOT = Path(__file__).resolve().parent.parent
+ICON_REFERENCE_DIR = APP_ROOT / "icons" / "reference"
+
 NAVY = (22, 38, 58)
 TEAL = (32, 184, 211)
 CYAN = (72, 210, 224)
@@ -253,24 +256,29 @@ def _logo_png_bytes(size: int) -> bytes:
 
 def make_logo_png(dest: Path, size: int = 256) -> None:
     """Write the shared Legal Sorter logo PNG."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(_logo_png_bytes(size))
 
 
-def ensure_logo_png(dest: Path, size: int = 256, force: bool = True) -> str:
+def ensure_logo_png(dest: Path, size: int = 256, force: bool = False) -> str:
     """Generate the shared Legal Sorter logo PNG.
 
-    Pass ``force=False`` to skip regeneration when the file already exists.
-    The default regenerates on every call so stale cached icons are always
-    replaced with the current design.
+    The default preserves an existing file and only writes when the asset is
+    missing. Pass ``force=True`` to explicitly refresh the file.
     """
     if force or not dest.exists():
         make_logo_png(dest, size=size)
     return str(dest)
 
 
+def logo_png_base64(size: int = 256) -> str:
+    """Return base64-encoded PNG bytes for Tk / web consumers without file writes."""
+    return base64.b64encode(_logo_png_bytes(size)).decode("ascii")
+
+
 def logo_data_uri(size: int = 256) -> str:
     """Return a base64 data URI for the shared Legal Sorter logo PNG."""
-    return "data:image/png;base64," + base64.b64encode(_logo_png_bytes(size)).decode("ascii")
+    return "data:image/png;base64," + logo_png_base64(size)
 
 
 def make_icon_ico(dest: Path) -> None:
@@ -279,6 +287,7 @@ def make_icon_ico(dest: Path) -> None:
     Uses a 256×256 RGBA PNG embedded in the ICO container.  A size value
     of 256 is stored as 0 in the ICO directory entry per the ICO spec.
     """
+    dest.parent.mkdir(parents=True, exist_ok=True)
     size = 256
     png = _logo_png_bytes(size)
     # Per the ICO spec, a width/height of 256 is encoded as 0 in the entry.
@@ -288,13 +297,18 @@ def make_icon_ico(dest: Path) -> None:
     dest.write_bytes(ico_header + ico_entry + png)
 
 
-def ensure_icon(dest: Path, force: bool = True) -> str:
+def ensure_icon(dest: Path, force: bool = False) -> str:
     """Generate the shared Legal Sorter .ico and return its path.
 
-    Pass ``force=False`` to skip regeneration when the file already exists.
-    The default regenerates on every call so stale cached icons are always
-    replaced with the current design.
+    The default preserves an existing icon and only generates the file when it
+    is missing. Pass ``force=True`` to explicitly refresh the icon.
     """
     if force or not dest.exists():
         make_icon_ico(dest)
+    return str(dest)
+
+
+def ensure_icon_reference_dir(dest: Path = ICON_REFERENCE_DIR) -> str:
+    """Create and return the shared folder for reference/source icon uploads."""
+    dest.mkdir(parents=True, exist_ok=True)
     return str(dest)
