@@ -134,7 +134,7 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
             """SELECT id, ref_no, virtual_folder, source_url, file_type,
                       entities_json, citations_json, keywords_json,
                       added_at, barcode, barcode_strategy,
-                      barcode_confidence, barcode_confirmed, text
+                      barcode_confidence, barcode_confirmed, text, cluster_id
                FROM documents WHERE id = ?""",
             (doc_id,),
         ).fetchone()
@@ -157,6 +157,7 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
 
     full_text = row[13] or ""
     full_text_cap = 12000
+    cluster_id = row[14]
     result = {
         "id": row[0],
         "ref_no": row[1],
@@ -174,6 +175,7 @@ def get_case(doc_id: str, principal: dict = Depends(require_reader)):
         "barcode_confirmed": bool(row[12]) if row[12] is not None else False,
         "full_text": full_text[:full_text_cap],
         "full_text_truncated": len(full_text) > full_text_cap,
+        "cluster_id": cluster_id,
         "cited_cases": cited_cases,
         "subsequent_history": subsequent_history,
     }
@@ -218,7 +220,7 @@ def list_cases(
                 if folder:
                     rows = conn.execute(
                         """SELECT id, ref_no, virtual_folder, source_url, added_at,
-                                  barcode, barcode_confidence
+                                  barcode, barcode_confidence, cluster_id
                            FROM documents WHERE virtual_folder LIKE ?
                            ORDER BY added_at DESC LIMIT ? OFFSET ?""",
                         (f"{folder}%", limit, offset),
@@ -226,7 +228,7 @@ def list_cases(
                 else:
                     rows = conn.execute(
                         """SELECT id, ref_no, virtual_folder, source_url, added_at,
-                                  barcode, barcode_confidence
+                                  barcode, barcode_confidence, cluster_id
                            FROM documents ORDER BY added_at DESC LIMIT ? OFFSET ?""",
                         (limit, offset),
                     ).fetchall()
@@ -248,6 +250,7 @@ def list_cases(
                 "added_at": r[4],
                 "barcode": r[5],
                 "barcode_confidence": r[6],
+                "cluster_id": r[7],
                 "subsequent_history": history_map.get(r[0], {}).get("items", []),
             }
             for r in rows
@@ -412,6 +415,150 @@ def ingest(body: IngestRequest, principal: dict = Depends(require_operator)):
         "duplicate_refs": duplicates,
     }
     auditlog.log_event(cfg, "api.ingest", actor=principal["actor"], role=principal["role"], details={"segments_submitted": len(segments), "stored": len(stored), "duplicates_skipped": len(duplicates), "label": body.label[:120]})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Docket cluster endpoints
+# ---------------------------------------------------------------------------
+
+class ClusterCreateRequest(BaseModel):
+    docket_number: Optional[str] = None
+    case_name: Optional[str] = None
+    court: Optional[str] = None
+    year: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ClusterAssignRequest(BaseModel):
+    doc_id: str
+
+
+@app.get("/api/clusters", tags=["Clusters"])
+def list_clusters(
+    limit: int = Query(default=50, le=200),
+    offset: int = Query(default=0, ge=0),
+    principal: dict = Depends(require_reader),
+):
+    """List all docket clusters ordered by creation date (newest first).
+
+    Each entry includes a ``doc_count`` of documents assigned to the cluster.
+    """
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        clusters = db.list_clusters(limit=limit, offset=offset)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"count": len(clusters), "offset": offset, "clusters": clusters}
+
+
+@app.post("/api/clusters", tags=["Clusters"])
+def create_cluster(body: ClusterCreateRequest, principal: dict = Depends(require_operator)):
+    """Create a new docket cluster.
+
+    Returns the newly created cluster record including its ``cluster_id``.
+    """
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        cluster_id = db.create_cluster(
+            docket_number=body.docket_number,
+            case_name=body.case_name,
+            court=body.court,
+            year=body.year,
+            notes=body.notes,
+        )
+        cluster = db.get_cluster(cluster_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    auditlog.log_event(_cfg(), "api.cluster_create", actor=principal["actor"], role=principal["role"], details={"cluster_id": cluster_id, "docket_number": body.docket_number})
+    return cluster
+
+
+@app.get("/api/cluster/{cluster_id}", tags=["Clusters"])
+def get_cluster(cluster_id: int, principal: dict = Depends(require_reader)):
+    """Return a docket cluster with all its member documents (the docket tree).
+
+    The ``documents`` list is ordered by ``added_at`` (oldest first) so the
+    procedural history reads chronologically.
+    """
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        cluster = db.get_cluster(cluster_id)
+        if not cluster:
+            raise HTTPException(status_code=404, detail=f"Cluster {cluster_id} not found.")
+        docs = db.get_cluster_documents(cluster_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {**cluster, "documents": docs}
+
+
+@app.post("/api/cluster/{cluster_id}/assign", tags=["Clusters"])
+def assign_to_cluster(
+    cluster_id: int,
+    body: ClusterAssignRequest,
+    principal: dict = Depends(require_operator),
+):
+    """Assign a document to a docket cluster.
+
+    To remove a document from its current cluster use
+    ``POST /api/cluster/unassign`` with ``{"doc_id": "…"}``.
+    """
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        cluster = db.get_cluster(cluster_id)
+        if not cluster:
+            raise HTTPException(status_code=404, detail=f"Cluster {cluster_id} not found.")
+        db.assign_cluster(body.doc_id, cluster_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    auditlog.log_event(_cfg(), "api.cluster_assign", actor=principal["actor"], role=principal["role"], details={"cluster_id": cluster_id, "doc_id": body.doc_id})
+    return {"ok": True, "cluster_id": cluster_id, "doc_id": body.doc_id}
+
+
+@app.post("/api/cluster/unassign", tags=["Clusters"])
+def unassign_from_cluster(
+    body: ClusterAssignRequest,
+    principal: dict = Depends(require_operator),
+):
+    """Remove a document from whatever cluster it currently belongs to."""
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        db.assign_cluster(body.doc_id, None)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    auditlog.log_event(_cfg(), "api.cluster_unassign", actor=principal["actor"], role=principal["role"], details={"doc_id": body.doc_id})
+    return {"ok": True, "doc_id": body.doc_id}
+
+
+@app.post("/api/admin/auto_affix_dockets", tags=["Admin"])
+def auto_affix_dockets(
+    dry_run: bool = Query(default=True, description="When true, report only — no DB changes"),
+    principal: dict = Depends(require_admin),
+):
+    """Heuristically group un-clustered documents by shared docket numbers.
+
+    Set ``dry_run=false`` to apply changes.  Always safe to run first with
+    ``dry_run=true`` (the default) to review the proposed groupings.
+
+    **Warning**: this may produce false positives (wrong groupings) or false
+    negatives (missed groupings).  Review ``proposals`` before committing.
+    """
+    try:
+        from src.database import DB
+        db = DB(_db_path())
+        result = db.auto_affix_dockets(dry_run=dry_run)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    auditlog.log_event(_cfg(), "api.auto_affix_dockets", actor=principal["actor"], role=principal["role"], details={"dry_run": dry_run, "candidates": result.get("candidates"), "docs_assigned": result.get("docs_assigned")})
     return result
 
 
@@ -947,6 +1094,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="gh-tabs">
     <button class="gh-tab active" onclick="switchTab('search',this)">🔍 Search <span class="count" id="tab-search-count"></span></button>
     <button class="gh-tab" onclick="switchTab('workspace',this)">🧩 Case Workspace</button>
+    <button class="gh-tab" onclick="switchTab('docket',this)">🗂️ Docket Tree</button>
     <button class="gh-tab" onclick="switchTab('ingest',this)">⬆ Bulk Ingest</button>
     <button class="gh-tab" onclick="switchTab('recent',this)">🕐 Recent Cases</button>
     <button class="gh-tab" onclick="switchTab('ai',this)">🤖 AI Assistant</button>
@@ -983,6 +1131,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
           <button class="workspace-subtab" data-tab="citations" onclick="switchWorkspaceSubtab('citations', this)">📚 Citations</button>
           <button class="workspace-subtab" data-tab="rulings" onclick="switchWorkspaceSubtab('rulings', this)">⚖️ Rulings</button>
           <button class="workspace-subtab" data-tab="history" onclick="switchWorkspaceSubtab('history', this)">🧭 Overturned / History</button>
+          <button class="workspace-subtab" data-tab="keywords" onclick="switchWorkspaceSubtab('keywords', this)">🏷️ Keywords</button>
+          <button class="workspace-subtab" data-tab="docket" onclick="switchWorkspaceSubtab('docket', this)">🗂️ Docket Cluster</button>
         </div>
         <div id="workspace-pane-case" class="workspace-tab-pane active">
           <div class="workspace-panel"><h4>📄 Case Text</h4><div id="workspace-case" class="workspace-scroll muted">No case loaded.</div></div>
@@ -996,6 +1146,53 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div id="workspace-pane-history" class="workspace-tab-pane">
           <div class="workspace-panel"><h4>🧭 Overturned / History</h4><div id="workspace-history" class="workspace-scroll muted">No case loaded.</div></div>
         </div>
+        <div id="workspace-pane-keywords" class="workspace-tab-pane">
+          <div class="workspace-panel"><h4>🏷️ Keywords</h4><div id="workspace-keywords" class="workspace-scroll muted">No case loaded.</div></div>
+        </div>
+        <div id="workspace-pane-docket" class="workspace-tab-pane">
+          <div class="workspace-panel"><h4>🗂️ Docket Cluster</h4><div id="workspace-docket-info" class="workspace-scroll muted">No case loaded.</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── DOCKET TREE panel ──────────────────────────────── -->
+  <div id="panel-docket" class="panel">
+    <div class="gh-box">
+      <div class="gh-box-header">
+        🗂️ Docket Tree
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="loadDocketTree()">Refresh</button>
+          <button class="btn btn-primary" onclick="showCreateCluster()">+ New Cluster</button>
+          <button class="btn" onclick="runAutoAffix(true)" title="Preview auto-grouping (no changes)">🔍 Preview Auto-Affix</button>
+          <button class="btn btn-danger" onclick="runAutoAffix(false)" title="Apply auto-grouping">⚡ Apply Auto-Affix</button>
+        </div>
+      </div>
+      <div class="gh-box-body">
+        <div id="docket-create-form" style="display:none;margin-bottom:12px;background:var(--color-canvas-default);border:1px solid var(--color-border-default);border-radius:6px;padding:12px">
+          <strong>New Cluster</strong>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+            <input id="dc-docket" class="gh-input" placeholder="Docket number (e.g. 1:23-cv-12345)" />
+            <input id="dc-name" class="gh-input" placeholder="Case name" />
+            <input id="dc-court" class="gh-input" placeholder="Court" />
+            <input id="dc-year" class="gh-input" placeholder="Year" />
+          </div>
+          <input id="dc-notes" class="gh-input" placeholder="Notes (optional)" style="margin-top:8px" />
+          <div class="row" style="margin-top:8px">
+            <button class="btn btn-primary" onclick="doCreateCluster()">Create</button>
+            <button class="btn" onclick="document.getElementById('docket-create-form').style.display='none'">Cancel</button>
+          </div>
+        </div>
+        <div id="docket-autoaffix-result" style="display:none;margin-bottom:12px;"></div>
+        <div id="docket-assign-form" style="display:none;margin-bottom:12px;background:var(--color-canvas-default);border:1px solid var(--color-border-default);border-radius:6px;padding:12px">
+          <strong>Assign document to cluster <span id="docket-assign-cluster-label"></span></strong>
+          <div class="row" style="margin-top:8px">
+            <input id="docket-assign-doc-id" class="gh-input" placeholder="Document ID to assign" />
+            <button class="btn btn-primary" onclick="doAssignToCluster()">Assign</button>
+            <button class="btn" onclick="document.getElementById('docket-assign-form').style.display='none'">Cancel</button>
+          </div>
+        </div>
+        <div id="docket-tree-list"></div>
       </div>
     </div>
   </div>
@@ -1095,13 +1292,7 @@ function safeSourceLink(url, label = 'Source ↗') {
 }
 
 /* ── Tab switching ───────────────────────────────────── */
-function switchTab(name, btn) {
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.gh-tab').forEach(b => b.classList.remove('active'));
-  document.getElementById('panel-' + name).classList.add('active');
-  btn.classList.add('active');
-  if (name === 'recent') loadRecentCases();
-}
+// switchTab is defined below in the Docket Tree section with docket support.
 
 function switchWorkspaceSubtab(name, btn) {
   document.querySelectorAll('#workspace-subtabs .workspace-subtab').forEach(b => b.classList.remove('active'));
@@ -1277,6 +1468,35 @@ async function loadCaseWorkspace(docIdValue = null) {
           return `<li><span class="${cls}">${label} · ${yr} · ${escapeHtml(treatment)}</span>${ctx ? `<br/><span class="muted">${ctx}</span>` : ''}</li>`;
         }).join('')}</ul>`
       : '<span class="muted">No subsequent history recorded.</span>';
+    // Keywords pane
+    const kwPane = document.getElementById('workspace-keywords');
+    if (kwPane) {
+      const kws = Array.isArray(d.keywords) ? d.keywords : [];
+      kwPane.innerHTML = kws.length
+        ? kws.map(k => `<span style="display:inline-block;background:var(--color-canvas-default);border:1px solid var(--color-border-default);border-radius:3px;padding:2px 8px;margin:2px 4px 2px 0;font-size:12px">${escapeHtml(String(k))}</span>`).join('')
+        : '<span class="muted">No keywords.</span>';
+    }
+    // Docket cluster pane
+    const dkPane = document.getElementById('workspace-docket-info');
+    if (dkPane) {
+      if (d.cluster_id != null) {
+        try {
+          const cl = await (await fetch('/api/cluster/' + d.cluster_id)).json();
+          if (cl.detail) throw new Error(cl.detail);
+          const docs = (cl.documents || []).map(doc =>
+            `<li${doc.id === docId ? ' style="font-weight:700"' : ''}>${escapeHtml(doc.ref_no || doc.id.slice(0,12))} — ${escapeHtml(doc.virtual_folder || '')}</li>`
+          ).join('');
+          dkPane.innerHTML = `
+            <div><strong>Cluster #${cl.cluster_id}</strong> — ${escapeHtml(cl.docket_number || 'no docket number')} ${cl.case_name ? '· ' + escapeHtml(cl.case_name) : ''}</div>
+            ${cl.court ? '<div class="muted">Court: ' + escapeHtml(cl.court) + (cl.year ? ' · ' + escapeHtml(cl.year) : '') + '</div>' : ''}
+            <ul class="workspace-list" style="margin-top:8px">${docs}</ul>`;
+        } catch(e) {
+          dkPane.innerHTML = `<span class="muted">Cluster #${d.cluster_id} (could not load details)</span>`;
+        }
+      } else {
+        dkPane.innerHTML = '<span class="muted">This document is not assigned to any docket cluster.</span>';
+      }
+    }
     status.textContent = `Loaded workspace for ${d.ref_no || docId}.`;
   } catch (err) {
     status.textContent = 'Failed to load workspace.';
@@ -1353,6 +1573,173 @@ async function showAiSource(index) {
     } catch(_) {}
   }
   fullPane.innerHTML = `<strong>${escapeHtml(label)}</strong>\n\n${escapeHtml(text || 'No source text available.')}`;
+}
+
+/* ── Docket Tree ─────────────────────────────────────── */
+let _docketAssignClusterId = null;
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.gh-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'recent') loadRecentCases();
+  if (name === 'docket') loadDocketTree();
+}
+
+async function loadDocketTree() {
+  const tgt = document.getElementById('docket-tree-list');
+  if (!tgt) return;
+  tgt.innerHTML = '<div class="muted">Loading clusters…</div>';
+  try {
+    const d = await (await fetch('/api/clusters?limit=200')).json();
+    const clusters = d.clusters || [];
+    if (!clusters.length) {
+      tgt.innerHTML = '<div class="muted">No docket clusters yet. Use "New Cluster" or "Auto-Affix" to create them.</div>';
+      return;
+    }
+    const capNotice = clusters.length >= 200 ? '<div class="muted" style="margin-bottom:8px">Showing first 200 clusters. Use the API for full pagination.</div>' : '';
+    tgt.innerHTML = capNotice + clusters.map(cl => `
+      <div class="gh-box" style="margin-bottom:10px">
+        <div class="gh-box-header" style="cursor:pointer" onclick="toggleClusterDocs(${cl.cluster_id})">
+          <span>🗂️ <strong>#${cl.cluster_id}</strong>
+            ${cl.docket_number ? ' — ' + escapeHtml(cl.docket_number) : ''}
+            ${cl.case_name ? ' · ' + escapeHtml(cl.case_name) : ''}
+          </span>
+          <span>
+            <span class="badge blue">${cl.doc_count} doc${cl.doc_count===1?'':'s'}</span>
+            ${cl.court ? ' <span class="muted" style="font-size:12px">' + escapeHtml(cl.court) + '</span>' : ''}
+            ${cl.year ? ' <span class="muted" style="font-size:12px">' + escapeHtml(cl.year) + '</span>' : ''}
+            <button class="btn" style="margin-left:8px" onclick="event.stopPropagation();showAssignForm(${cl.cluster_id})">+ Assign doc</button>
+          </span>
+        </div>
+        <div id="cluster-docs-${cl.cluster_id}" style="display:none">
+          <div class="gh-box-body" id="cluster-docs-body-${cl.cluster_id}">
+            <span class="muted">Loading…</span>
+          </div>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    tgt.innerHTML = `<div class="danger">Failed to load clusters: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+async function toggleClusterDocs(clusterId) {
+  const wrap = document.getElementById('cluster-docs-' + clusterId);
+  const body = document.getElementById('cluster-docs-body-' + clusterId);
+  if (!wrap) return;
+  const visible = wrap.style.display !== 'none';
+  wrap.style.display = visible ? 'none' : 'block';
+  if (!visible) {
+    body.innerHTML = '<span class="muted">Loading…</span>';
+    try {
+      const d = await (await fetch('/api/cluster/' + clusterId)).json();
+      if (d.detail) throw new Error(d.detail);
+      const docs = d.documents || [];
+      body.innerHTML = docs.length
+        ? `<table style="width:100%;border-collapse:collapse;font-size:13px">
+             <thead><tr style="border-bottom:1px solid var(--color-border-muted)"><th style="text-align:left;padding:4px 8px">Ref</th><th style="text-align:left;padding:4px 8px">Folder</th><th style="text-align:left;padding:4px 8px">Added</th><th style="text-align:left;padding:4px 8px">Keywords</th><th style="padding:4px 8px"></th></tr></thead>
+             <tbody>${docs.map(doc => `
+               <tr style="border-bottom:1px solid var(--color-border-muted)">
+                 <td style="padding:4px 8px"><strong>${escapeHtml(doc.ref_no||'?')}</strong></td>
+                 <td style="padding:4px 8px">${escapeHtml(doc.virtual_folder||'Uncategorized')}</td>
+                 <td style="padding:4px 8px;color:var(--color-fg-muted)">${escapeHtml((doc.added_at||'').slice(0,10))}</td>
+                 <td style="padding:4px 8px;color:var(--color-fg-muted)">${escapeHtml((Array.isArray(doc.keywords)?doc.keywords:[]).slice(0,4).join(', '))}</td>
+                 <td style="padding:4px 8px">
+                   <button class="btn js-open-workspace" data-doc-id="${escapeHtml(doc.id)}" style="font-size:12px;padding:2px 8px">Open</button>
+                   <button class="btn btn-danger" onclick="unassignDoc('${escapeHtml(doc.id)}',${clusterId})" style="font-size:12px;padding:2px 8px">Remove</button>
+                 </td>
+               </tr>`).join('')}
+             </tbody>
+           </table>`
+        : '<span class="muted">No documents in this cluster.</span>';
+    } catch(e) {
+      body.innerHTML = `<span class="danger">Failed: ${escapeHtml(String(e))}</span>`;
+    }
+  }
+}
+
+function showCreateCluster() {
+  const f = document.getElementById('docket-create-form');
+  f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+
+async function doCreateCluster() {
+  const body = {
+    docket_number: document.getElementById('dc-docket').value.trim() || null,
+    case_name: document.getElementById('dc-name').value.trim() || null,
+    court: document.getElementById('dc-court').value.trim() || null,
+    year: document.getElementById('dc-year').value.trim() || null,
+    notes: document.getElementById('dc-notes').value.trim() || null,
+  };
+  try {
+    const r = await fetch('/api/clusters', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok) { alert('Error: ' + (d.detail || 'Unknown error')); return; }
+    document.getElementById('docket-create-form').style.display = 'none';
+    loadDocketTree();
+  } catch(e) { alert('Request failed: ' + String(e)); }
+}
+
+function showAssignForm(clusterId) {
+  _docketAssignClusterId = clusterId;
+  document.getElementById('docket-assign-cluster-label').textContent = '#' + clusterId;
+  document.getElementById('docket-assign-doc-id').value = '';
+  document.getElementById('docket-assign-form').style.display = 'block';
+}
+
+async function doAssignToCluster() {
+  const docId = document.getElementById('docket-assign-doc-id').value.trim();
+  if (!docId || _docketAssignClusterId == null) return;
+  try {
+    const r = await fetch('/api/cluster/' + _docketAssignClusterId + '/assign', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({doc_id: docId}),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert('Error: ' + (d.detail || 'Unknown error')); return; }
+    document.getElementById('docket-assign-form').style.display = 'none';
+    loadDocketTree();
+  } catch(e) { alert('Request failed: ' + String(e)); }
+}
+
+async function unassignDoc(docId, clusterId) {
+  if (!confirm('Remove this document from the cluster?')) return;
+  try {
+    const r = await fetch('/api/cluster/unassign', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({doc_id: docId}),
+    });
+    if (!r.ok) { const d = await r.json(); alert('Error: ' + (d.detail||'Unknown')); return; }
+    // Reload just that cluster's document list
+    const body = document.getElementById('cluster-docs-body-' + clusterId);
+    const wrap = document.getElementById('cluster-docs-' + clusterId);
+    if (wrap && body) { wrap.style.display = 'none'; }
+    loadDocketTree();
+  } catch(e) { alert('Request failed: ' + String(e)); }
+}
+
+async function runAutoAffix(dryRun) {
+  const tgt = document.getElementById('docket-autoaffix-result');
+  tgt.style.display = 'block';
+  tgt.innerHTML = '<span class="muted">Running auto-affix…</span>';
+  try {
+    const r = await fetch('/api/admin/auto_affix_dockets?dry_run=' + (dryRun?'true':'false'), {method:'POST'});
+    const d = await r.json();
+    if (!r.ok) { tgt.innerHTML = `<div class="danger">${escapeHtml(d.detail||'Error')}</div>`; return; }
+    const proposals = (d.proposals||[]).map(p =>
+      `<li><strong>${escapeHtml(p.docket_number)}</strong>: ${p.doc_ids.length} doc(s)${p.cluster_id!=null?' → cluster #'+p.cluster_id:' → new cluster'}</li>`
+    ).join('');
+    tgt.innerHTML = `
+      <div class="ingest-summary">
+        <div class="${dryRun?'muted':'ok'}">${dryRun?'🔍 Preview (no changes made)':'✓ Applied'}</div>
+        <div>Scanned: ${d.scanned} · Candidates: ${d.candidates} · Clusters created: ${d.clusters_created} · Docs assigned: ${d.docs_assigned}</div>
+        ${proposals ? '<ul class="workspace-list" style="margin-top:6px">'+proposals+'</ul>' : '<div class="muted">No multi-document docket groups found.</div>'}
+      </div>`;
+    if (!dryRun) loadDocketTree();
+  } catch(e) {
+    tgt.innerHTML = `<div class="danger">Request failed: ${escapeHtml(String(e))}</div>`;
+  }
 }
 
 /* ── Boot ────────────────────────────────────────────── */
