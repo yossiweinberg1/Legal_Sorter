@@ -75,14 +75,57 @@ def _sample_chunks(text: str, chunk_size: int = 500) -> str:
     )
 
 
+def _heuristic_legal_check(text: str) -> tuple[bool, str]:
+    """Lightweight offline check used when the LLM is unavailable.
+
+    A document is considered *probably legal* when it has at least 100 words
+    after stripping common header/footer noise **and** contains at least one
+    structural indicator:
+      • a reporter citation  (e.g. "123 F.3d 456")
+      • a party separator    ("v.", "vs.", "IN RE")
+      • a docket-number pattern
+    """
+    import re as _re
+    stripped = _re.sub(r'\s+', ' ', text or "").strip()
+    word_count = len(stripped.split())
+    if word_count < 50:
+        return False, f"too short ({word_count} words — minimum 50 required)"
+
+    _CITATION = _re.compile(
+        r'\b\d{2,4}\s+(?:U\.S\.|F\.(?:2d|3d)?|F\.?\s?Supp\.?(?:2d|3d)?|'
+        r'S\.?\s?Ct\.|L\.?\s?Ed\.?(?:2d)?)\s+\d+\b', _re.IGNORECASE
+    )
+    _PARTY = _re.compile(r'\bv\.\s+[A-Z]|\bvs\.\s+[A-Z]|\bIN\s+RE\b', _re.IGNORECASE)
+    _DOCKET = _re.compile(
+        r'\b(?:Case|Docket)\s+No\.\s+[A-Z0-9][A-Z0-9:/_.-]{3,24}|'
+        r'\b\d{1,2}:\d{2}-(?:cv|cr|mc|ap)-\d{4,6}', _re.IGNORECASE
+    )
+
+    if _CITATION.search(stripped):
+        return True, "contains reporter citation"
+    if _PARTY.search(stripped):
+        return True, "contains party separator"
+    if _DOCKET.search(stripped):
+        return True, "contains docket number"
+
+    return False, "no legal structure detected (no citations, party separators, or docket numbers)"
+
+
 def sanity_check_document(text: str, cfg: dict) -> tuple[bool, str]:
     """Send three sampled chunks (beginning / middle / end) to a small LLM
     and ask whether the content is a real legal document.
 
     Returns (passed: bool, reason: str).
-    If the LLM call fails for any reason the check is treated as passed so
-    that a misconfigured API key or network outage does not block ingestion.
+
+    If the LLM call fails for any reason the check falls back to a fast
+    offline heuristic so that network/API issues do not silently pass
+    low-quality content.  A minimum length check (50 characters) is always
+    applied first.
     """
+    # ── Minimum length guard (always applied) ───────────────────────────────
+    if len((text or "").strip()) < 50:
+        return False, "text too short (< 50 characters)"
+
     llm_cfg = cfg.get("llm", {})
     import os
     api_cfg = {
@@ -92,9 +135,9 @@ def sanity_check_document(text: str, cfg: dict) -> tuple[bool, str]:
     }
 
     if not api_cfg["api_key"]:
-        # No LLM configured — skip check rather than block all ingestion
-        log.debug("[SANITY] No LLM API key set; skipping content sanity check.")
-        return True, "skipped (no API key)"
+        # No LLM configured — fall back to heuristic rather than silently passing
+        log.debug("[SANITY] No LLM API key set; using heuristic check.")
+        return _heuristic_legal_check(text)
 
     sample = _sample_chunks(text)
 
@@ -132,8 +175,9 @@ def sanity_check_document(text: str, cfg: dict) -> tuple[bool, str]:
             data = _json.loads(resp.read())
             reply = data["choices"][0]["message"]["content"].strip()
     except Exception as exc:
-        log.warning("[SANITY] LLM call failed (%s) — treating check as passed.", exc)
-        return True, f"skipped (LLM error: {exc})"
+        log.warning("[SANITY] LLM call failed (%s) — falling back to heuristic check.", exc)
+        # Do NOT silently pass on LLM failure; use offline heuristic instead
+        return _heuristic_legal_check(text)
 
     passed = reply.upper().startswith("YES")
     reason = reply.split(":", 1)[1].strip() if ":" in reply else reply

@@ -1,14 +1,57 @@
 import json
+import logging
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
 from .citation_history import normalize_citation
 
+log = logging.getLogger(__name__)
+
 LEGAL_SORTER_DB_PATH = r"C:\LegalSorter\index\legal_sorter.db"
-SQLITE_RETRY_ATTEMPTS = 5
-SQLITE_RETRY_SLEEP_SECONDS = 0.15
+SQLITE_RETRY_ATTEMPTS = 8
+SQLITE_RETRY_SLEEP_SECONDS = 0.2
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WAL / SHM repair
+# Must be called before ANY connection is opened for that DB path.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def repair_wal(db_path: str) -> bool:
+    """Delete stale WAL/SHM files when the WAL is 0-bytes and no connection is
+    open.  Safe to call at application startup before any sqlite3.connect().
+
+    Returns True if stale files were removed, False otherwise.
+    """
+    wal_path = Path(db_path + "-wal")
+    shm_path = Path(db_path + "-shm")
+    if wal_path.exists() and wal_path.stat().st_size == 0 and shm_path.exists():
+        try:
+            wal_path.unlink(missing_ok=True)
+            shm_path.unlink(missing_ok=True)
+            log.info("[DB] Removed stale WAL/SHM files for %s", db_path)
+            return True
+        except OSError as exc:
+            log.warning("[DB] Could not remove stale WAL/SHM: %s", exc)
+    return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-path write lock – prevents concurrent writes from different threads
+# sharing the same in-process connection pool.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_write_locks: dict[str, threading.Lock] = {}
+_write_locks_meta = threading.Lock()
+
+
+def _get_write_lock(db_path: str) -> threading.Lock:
+    with _write_locks_meta:
+        if db_path not in _write_locks:
+            _write_locks[db_path] = threading.Lock()
+        return _write_locks[db_path]
 
 
 def resolve_db_path(db_path: str | None = None) -> str:
@@ -30,12 +73,23 @@ def resolve_db_path(db_path: str | None = None) -> str:
 
 
 def connect_sqlite(db_path: str | None = None) -> sqlite3.Connection:
+    """Open (or reuse) a connection with WAL mode and a 60 s busy timeout.
+
+    The caller still owns the connection lifetime.  For write-heavy paths use
+    the ``_get_write_lock(resolved)`` context manager around every commit so
+    that only one writer at a time reaches SQLite's internal write lock.
+    """
     resolved = resolve_db_path(db_path)
     Path(resolved).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(resolved, timeout=30, check_same_thread=False)
+    # Attempt WAL/SHM cleanup before connecting (no-op if files look healthy)
+    repair_wal(resolved)
+    conn = sqlite3.connect(resolved, timeout=60, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=30000;")
+    # 60 000 ms mirrors the Python-level timeout so SQLite's own busy handler
+    # matches and we never hit the Python-side timeout first.
+    conn.execute("PRAGMA busy_timeout=60000;")
+    conn.execute("PRAGMA cache_size=-32000;")  # ~32 MB page cache
     return conn
 
 
@@ -44,9 +98,11 @@ def safe_connection_execute(conn: sqlite3.Connection, sql, params=()):
         try:
             return conn.execute(sql, params)
         except sqlite3.OperationalError as exc:
-            if "database is locked" not in str(exc).lower() or attempt == SQLITE_RETRY_ATTEMPTS - 1:
+            msg = str(exc).lower()
+            if "database is locked" not in msg or attempt == SQLITE_RETRY_ATTEMPTS - 1:
+                log.warning("[DB] safe_connection_execute failed after %d attempts: %s", attempt + 1, exc)
                 raise
-            time.sleep(SQLITE_RETRY_SLEEP_SECONDS)
+            time.sleep(SQLITE_RETRY_SLEEP_SECONDS * (attempt + 1))  # back-off
 
 
 def safe_connection_commit(conn: sqlite3.Connection):
@@ -55,9 +111,11 @@ def safe_connection_commit(conn: sqlite3.Connection):
             conn.commit()
             return
         except sqlite3.OperationalError as exc:
-            if "database is locked" not in str(exc).lower() or attempt == SQLITE_RETRY_ATTEMPTS - 1:
+            msg = str(exc).lower()
+            if "database is locked" not in msg or attempt == SQLITE_RETRY_ATTEMPTS - 1:
+                log.warning("[DB] safe_connection_commit failed after %d attempts: %s", attempt + 1, exc)
                 raise
-            time.sleep(SQLITE_RETRY_SLEEP_SECONDS)
+            time.sleep(SQLITE_RETRY_SLEEP_SECONDS * (attempt + 1))  # back-off
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -161,6 +219,7 @@ CREATE TABLE IF NOT EXISTS docket_clusters (
 
 CREATE INDEX IF NOT EXISTS idx_docket_clusters_docket ON docket_clusters (docket_number);
 CREATE INDEX IF NOT EXISTS idx_documents_cluster_id ON documents (cluster_id);
+CREATE INDEX IF NOT EXISTS idx_documents_sanity ON documents (sanity_check_passed);
 """
 
 FTS_SETUP = """
@@ -192,16 +251,20 @@ class DB:
     def __init__(self, db_path: str):
         db_path = resolve_db_path(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        # timeout=30: wait up to 30 s for another writer to release the lock
+        # Attempt WAL/SHM repair before opening (no-op when files look healthy)
+        repair_wal(db_path)
+        self._db_path = db_path
+        self._write_lock = _get_write_lock(db_path)
+        # timeout=60: wait up to 60 s for another writer to release the lock
         # before raising OperationalError, preventing crashes when run.py and
         # bulk_ingest.py both write to the same DB concurrently.
-        self.conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
+        self.conn = sqlite3.connect(db_path, timeout=60, check_same_thread=False)
         # WAL mode allows readers and writers to coexist without blocking each other.
         # busy_timeout mirrors the Python-level timeout inside SQLite itself.
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
-        self.conn.execute("PRAGMA busy_timeout=30000;")
-        self.conn.execute("PRAGMA cache_size=-32000")  # ~32 MB page cache
+        self.conn.execute("PRAGMA busy_timeout=60000;")
+        self.conn.execute("PRAGMA cache_size=-32000;")  # ~32 MB page cache
         self.conn.executescript(SCHEMA)
         self.safe_commit()
 
@@ -321,7 +384,12 @@ class DB:
         return safe_connection_execute(self.conn, sql, params)
 
     def safe_commit(self):
-        safe_connection_commit(self.conn)
+        # Acquire the per-path write lock so that concurrent threads (UI +
+        # crawler subprocess share the same Python process on some deployments)
+        # never issue simultaneous commits, which is the primary source of
+        # "database is locked" errors with WAL mode.
+        with self._write_lock:
+            safe_connection_commit(self.conn)
 
     def add_to_priority_queue(self, citation, status="SYSTEM_SEED"):
         self.safe_execute(
@@ -546,8 +614,24 @@ class DB:
     ]
 
     @classmethod
+    def _normalize_docket(cls, raw: str) -> str:
+        """Normalize a docket number to a canonical form for reliable comparison.
+
+        Handles common variants:
+          1:23-cv-00412  →  1:23-cv-00412
+          23-412         →  23-00412
+          23-CV-00412    →  23-cv-00412
+        """
+        import re as _re
+        # Lower-case and collapse whitespace
+        s = _re.sub(r'\s+', '', raw.lower().strip(" ./,;"))
+        # Pad short sequences after a hyphen to 5 digits: 23-412 → 23-00412
+        s = _re.sub(r'(?<=-|:)(\d{1,4})(?!\d)', lambda m: m.group(1).zfill(5), s)
+        return s
+
+    @classmethod
     def _extract_docket_numbers(cls, text: str) -> list[str]:
-        """Return a deduplicated list of docket numbers found in *text*.
+        """Return a deduplicated list of *normalized* docket numbers found in *text*.
 
         Uses conservative patterns to minimise false positives.  Returns at
         most 5 candidates (the earliest-occurring ones).
@@ -559,7 +643,7 @@ class DB:
         for pattern in cls._DOCKET_PATTERNS:
             for m in _re.finditer(pattern, search_text):
                 candidate = m.group(1) if m.lastindex else m.group(0)
-                candidate = candidate.strip(" ./,;")
+                candidate = cls._normalize_docket(candidate)
                 if candidate and candidate not in seen:
                     seen.add(candidate)
                     found.append(candidate)
@@ -668,7 +752,13 @@ class DB:
         1. For every document without a ``cluster_id``, extract docket numbers
            from the first 8 000 characters of its text.
         2. Build a mapping  docket_number → [doc_id, …]  from those candidates.
-        3. Any docket number shared by 2+ documents is a *cluster candidate*.
+        3. Any docket number shared by 2+ documents is a *cluster candidate*,
+           **but only** when the candidate group also satisfies at least one of:
+             a) two or more documents share the same jurisdiction (virtual_folder
+                prefix), **or**
+             b) two or more documents share at least one citation.
+           This prevents unrelated cases that happen to mention the same SCOTUS
+           citation or sit in the same district from being wrongly clustered.
         4. Existing clusters whose ``docket_number`` matches are reused;
            otherwise a new cluster is created.
         5. Documents in a candidate group that already belong to a *different*
@@ -688,15 +778,36 @@ class DB:
             docs_assigned    — documents whose cluster_id was set
             proposals        — list of {docket_number, doc_ids, cluster_id|None}
         """
+        import json as _json
         rows = self.safe_execute(
-            """SELECT id, SUBSTR(text, 1, 8000) FROM documents
+            """SELECT id, SUBSTR(text, 1, 8000), virtual_folder, citations_json
+               FROM documents
                WHERE cluster_id IS NULL AND text IS NOT NULL
                ORDER BY added_at""",
         ).fetchall()
 
+        # Pre-build per-doc metadata
+        doc_meta: dict[str, dict] = {}
+        for doc_id, text, vfolder, cit_raw in rows:
+            try:
+                citations: list[str] = _json.loads(cit_raw) if cit_raw else []
+            except Exception:
+                citations = []
+            # Extract the leading jurisdiction segment (e.g. "Jurisdiction_California")
+            juris = ""
+            for part in (vfolder or "").replace("\\", "/").split("/"):
+                if part.startswith("Jurisdiction_"):
+                    juris = part
+                    break
+            doc_meta[doc_id] = {
+                "text": text,
+                "juris": juris,
+                "citations": set(c.strip() for c in citations if c and len(c) > 4),
+            }
+
         # docket_number → list of doc_ids
         docket_map: dict[str, list[str]] = {}
-        for doc_id, text in rows:
+        for doc_id, text, _vf, _cit in rows:
             for dn in self._extract_docket_numbers(text):
                 docket_map.setdefault(dn, []).append(doc_id)
 
@@ -710,6 +821,23 @@ class DB:
             # Deduplicate while preserving order
             seen: set[str] = set()
             unique_ids = [d for d in doc_ids if not (d in seen or seen.add(d))]  # type: ignore[func-returns-value]
+
+            # ── Safety guard 1: shared jurisdiction ──────────────────────────
+            jurisdictions = [doc_meta[d]["juris"] for d in unique_ids if doc_meta.get(d, {}).get("juris")]
+            same_juris = len(jurisdictions) >= 2 and len(set(jurisdictions)) == 1
+
+            # ── Safety guard 2: shared citation ──────────────────────────────
+            citation_sets = [doc_meta[d]["citations"] for d in unique_ids if doc_meta.get(d, {}).get("citations")]
+            shared_citation = False
+            if len(citation_sets) >= 2:
+                common = citation_sets[0].copy()
+                for cs in citation_sets[1:]:
+                    common &= cs
+                shared_citation = bool(common)
+
+            if not (same_juris or shared_citation):
+                # Not enough evidence to cluster — skip to avoid false positives
+                continue
 
             # Look for an existing cluster with this docket number
             existing = self.safe_execute(
