@@ -27,6 +27,36 @@ VECTORIZER_FILE = MODULE_DIR / "vectorizer.joblib"
 PATHS_FILE = MODULE_DIR / "indexed_paths.joblib"
 CACHE_LOCK = threading.RLock()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Extended stop-word list: scikit-learn's English set plus high-frequency legal
+# boilerplate that does not contribute to *semantic* similarity between cases.
+# Without this, "affirmed", "court", "judgment" dominate the TF-IDF space and
+# cause unrelated cases to score as similar.
+# ──────────────────────────────────────────────────────────────────────────────
+_LEGAL_BOILERPLATE = {
+    "affirmed", "reversed", "remanded", "dismissed", "submitted", "decided",
+    "argued", "filed", "ordered", "granted", "denied", "entered",
+    "court", "courts", "judge", "judges", "justice", "justices",
+    "plaintiff", "defendant", "petitioner", "respondent", "appellant",
+    "appellee", "claimant", "counsel", "attorney", "attorneys",
+    "judgment", "judgments", "order", "orders", "opinion", "opinions",
+    "district", "circuit", "appellate", "superior", "supreme",
+    "section", "subsection", "paragraph", "clause", "title",
+    "versus", "case", "cases", "docket", "number", "numbers",
+    "pursuant", "herein", "therein", "thereof", "thereto", "heretofore",
+    "whereas", "wherefore", "whereby", "notwithstanding",
+    "shall", "may", "must", "will", "hereby",
+}
+
+# Merge with sklearn's built-in English stop words
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as _sklearn_en
+_LEGAL_STOP_WORDS: list[str] = sorted(_LEGAL_BOILERPLATE | set(_sklearn_en))
+
+# Minimum cosine-similarity score for a cross-reference to be considered
+# meaningful.  0.05 (old value) let boilerplate-heavy documents surface as
+# "similar"; 0.18 requires substantial term overlap.
+_SIMILARITY_THRESHOLD = 0.18
+
 
 def _load_config(config_path: str = "config.yaml") -> dict:
     if os.path.exists(config_path):
@@ -220,7 +250,10 @@ def build_and_cache_index() -> tuple[bool, str]:
             return False, "No indexed documents found. Ingest cases first."
 
         vectorizer = TfidfVectorizer(
-            max_features=25000, stop_words="english", strip_accents="unicode"
+            max_features=25000,
+            stop_words=_LEGAL_STOP_WORDS,
+            strip_accents="unicode",
+            min_df=2,
         )
         tfidf_matrix = vectorizer.fit_transform(texts)
 
@@ -272,7 +305,7 @@ def get_similar_cases(target_label: str, top_n: int = 5) -> dict:
             if idx == target_idx:
                 continue
             score = float(similarities[idx])
-            if score <= 0.05:
+            if score < _SIMILARITY_THRESHOLD:
                 break
             entry = entries[idx]
             results.append(
@@ -351,7 +384,10 @@ def get_similar_cases_filtered(
         }
 
     vectorizer = TfidfVectorizer(
-        max_features=25000, stop_words="english", strip_accents="unicode"
+        max_features=25000,
+        stop_words=_LEGAL_STOP_WORDS,
+        strip_accents="unicode",
+        min_df=2,
     )
     tfidf_matrix = vectorizer.fit_transform(texts)
 
@@ -364,7 +400,7 @@ def get_similar_cases_filtered(
         if idx == target_idx:
             continue
         score = float(similarities[idx])
-        if score <= 0.05:
+        if score < _SIMILARITY_THRESHOLD:
             break
         entry = entries[idx]
         results.append(

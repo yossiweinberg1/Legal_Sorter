@@ -17,7 +17,7 @@ from similarity_service import build_and_cache_index, get_similar_cases
 from src.legal_fetch import CourtListenerClient
 from src.study_assistant import generate_study_response, NO_DOCS_SENTINEL, NO_MATCH_SENTINEL
 from src.legal_ai import query_cases, analyze_case, semantic_search
-from src.database import DB, connect_sqlite, safe_connection_commit, safe_connection_execute
+from src.database import DB, connect_sqlite, repair_wal, safe_connection_commit, safe_connection_execute
 from src.setup_wizard import is_first_run, run_gui_wizard
 
 # Import the window class from the new file you just created
@@ -71,11 +71,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "src", "
 _safe_console_print("[Bootloader] Source paths appended to environment.")
 
 # Diagnostic pre-import sequence
+TORCH_AVAILABLE = False
 try:
     _safe_console_print("[Bootloader] Safe-loading PyTorch core...")
     start_t = time.time()
     try:
         import torch
+        TORCH_AVAILABLE = True
         _safe_console_print(f"[Bootloader] PyTorch loaded successfully in {time.time() - start_t:.2f}s.")
     except ImportError as e:
         # torch may not be installed yet (e.g. first run before setup wizard finishes,
@@ -84,17 +86,20 @@ try:
         _safe_console_print(
             f"[Bootloader ⚠️  WARNING] PyTorch not available — LLM features disabled. ({e})"
         )
-        raise  # re-raise so the outer except skips the `import train` block
+        # Do NOT re-raise: let the app boot without LLM support.
 
-    _safe_console_print("[Bootloader] Safe-loading training dependencies...")
-    start_t = time.time()
-    import train
-    _safe_console_print(f"[Bootloader] Training matrix loaded successfully in {time.time() - start_t:.2f}s.")
-except ImportError:
-    pass  # already logged above; skip dependent imports that require torch
+    if TORCH_AVAILABLE:
+        _safe_console_print("[Bootloader] Safe-loading training dependencies...")
+        start_t = time.time()
+        try:
+            import train
+            _safe_console_print(f"[Bootloader] Training matrix loaded successfully in {time.time() - start_t:.2f}s.")
+        except ImportError as e:
+            _safe_console_print(f"[Bootloader ⚠️  WARNING] Training module not available: {e}")
 except Exception as e:
     _safe_console_print(f"[Bootloader ❌ ERROR] Pre-import sequence failed: {e}")
     _safe_traceback_print()
+    # Still continue — do not crash the app on optional dependency failures
 
 _safe_console_print("[Bootloader] All systems green. Initializing Tkinter window...\n")
 
@@ -129,6 +134,7 @@ class LegalSorterApp:
         self.root.minsize(1120, 740)
         self._app_icon = None
         self._tabbed_viewers = {}
+        self._workspace_counter = 0  # incremented for each new workspace window
         try:
             self.icon_reference_dir = _ensure_icon_reference_dir()
         except Exception:
@@ -171,6 +177,45 @@ class LegalSorterApp:
         except Exception:
             self._app_icon = None
 
+    def change_app_icon(self):
+        """Open a file dialog to select a custom .png or .ico app icon."""
+        src = filedialog.askopenfilename(
+            title="Select App Icon",
+            filetypes=[
+                ("Image files", "*.png *.ico"),
+                ("PNG", "*.png"),
+                ("ICO", "*.ico"),
+            ],
+        )
+        if not src:
+            return  # user cancelled
+
+        src_path = Path(src)
+        base_dir = Path(__file__).resolve().parent
+        dest_ico = base_dir / "legal_sorter.ico"
+        dest_png = base_dir / "legal_sorter.png"
+
+        try:
+            if src_path.suffix.lower() == ".ico":
+                shutil.copy2(src, dest_ico)
+                # Also update the PNG path for non-Windows fallback
+                shutil.copy2(src, dest_png)
+            else:
+                shutil.copy2(src, dest_png)
+                # On Windows, copy as .ico as well (many ICO viewers tolerate PNG data)
+                if sys.platform == "win32":
+                    shutil.copy2(src, dest_ico)
+
+            # Reload branding immediately
+            # Re-check the module-level paths by updating globals
+            global _ICON_PATH, _LOGO_PNG_PATH
+            _ICON_PATH = dest_ico
+            _LOGO_PNG_PATH = dest_png
+            self.apply_branding()
+            messagebox.showinfo("App Icon", f"Icon updated successfully from:\n{src_path.name}")
+        except Exception as exc:
+            messagebox.showerror("App Icon Error", f"Failed to copy icon:\n{exc}")
+
     def build_menu(self):
         """Builds a simple modern command menu for frequently used actions."""
         menubar = tk.Menu(self.root)
@@ -198,6 +243,7 @@ class LegalSorterApp:
         settings_menu = tk.Menu(menubar, tearoff=0)
         settings_menu.add_command(label="⚙️ API Key Manager", command=self.open_api_key_manager)
         settings_menu.add_command(label="🧰 Setup / Repair Wizard", command=self.open_setup_wizard)
+        settings_menu.add_command(label="🖼️ Change App Icon…", command=self.change_app_icon)
         settings_menu.add_command(label="🖥️ Create Desktop Shortcut", command=self._create_desktop_shortcut)
         settings_menu.add_separator()
         settings_menu.add_command(label="Toggle Log Auto-scroll",
@@ -643,8 +689,9 @@ class LegalSorterApp:
             ("rulings", "⚖️ Rulings", str(payload["ruling_logic"])),
             ("history", "🧭 Overturned / History", history_text),
         ]
+        self._workspace_counter += 1
         self._show_tabbed_viewer(
-            viewer_id="case_workspace",
+            viewer_id=f"case_workspace_{self._workspace_counter}",
             window_title=f"🧩 {title} — Case Workspace",
             tabs=tabs,
             source_url=payload["source_url"],
@@ -679,8 +726,9 @@ class LegalSorterApp:
             ("llm_sources", "🔗 Sources", sources_text),
             ("llm_full", "📖 Full Source Text", full_sources_text),
         ]
+        self._workspace_counter += 1
         self._show_tabbed_viewer(
-            viewer_id="llm_workspace",
+            viewer_id=f"llm_workspace_{self._workspace_counter}",
             window_title="🤖 LLM Workspace",
             tabs=tabs,
         )
@@ -713,7 +761,7 @@ class LegalSorterApp:
                 return False, "No URL available and no text archived in database."
             label = ref_no or doc_id
             if show_viewer:
-                self.root.after(0, lambda: self._show_case_viewer(
+                self.root.after_idle(lambda: self._show_case_viewer(
                     title=label, content=text_content, source_url=source_url or ""
                 ))
             return True, label
@@ -737,7 +785,7 @@ class LegalSorterApp:
 
         label = ref_no or doc_id
         if show_viewer:
-            self.root.after(0, lambda: self._show_case_viewer(
+            self.root.after_idle(lambda: self._show_case_viewer(
                 title=label, content=file_content, source_url=source_url
             ))
         return True, tmp_path
@@ -890,6 +938,12 @@ class LegalSorterApp:
             self.db_path = os.path.abspath(os.path.join("index", "legal_sorter.db"))
         if not os.path.exists(self.db_path):
             self.db_path = os.path.abspath("legal_sorter.db")
+        # Repair stale WAL/SHM files before any connection is opened
+        if self.db_path:
+            try:
+                repair_wal(self.db_path)
+            except Exception:
+                pass
 
     def run_setup_wizard_if_needed(self):
         try:
@@ -1186,7 +1240,8 @@ class LegalSorterApp:
         search_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
         ttk.Label(search_frame, text="🔍").pack(side=tk.LEFT, padx=(0, 4))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self.refresh_case_tree())
+        self._search_debounce_id = None  # after() callback id for debounced refresh
+        self.search_var.trace_add("write", lambda *_: self._debounced_refresh_case_tree())
         self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=28)
         self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -1480,7 +1535,7 @@ class LegalSorterApp:
                     if url:
                         line += f"\n    {url}"
                     self._ai_append(line + "\n", "source")
-            self.root.after(0, lambda: self._open_llm_workspace_windows(question, answer, sources))
+            self.root.after_idle(lambda: self._open_llm_workspace_windows(question, answer, sources))
             self._ai_set_status(f"✅ Done — {len(sources)} source(s) cited.")
         except Exception as exc:
             self._ai_append(f"\n❌ Error: {exc}\n", "error")
@@ -2102,9 +2157,23 @@ class LegalSorterApp:
         except Exception as error:
             print(f"[Sync Warning] Database sync cycle interrupted: {error}")
 
+    def _debounced_refresh_case_tree(self):
+        """Cancel any pending tree refresh and schedule a new one 300 ms out.
+
+        This prevents a full DB query + tree rebuild on every keystroke while
+        the user is still typing in the search box.
+        """
+        if self._search_debounce_id is not None:
+            try:
+                self.root.after_cancel(self._search_debounce_id)
+            except Exception:
+                pass
+        self._search_debounce_id = self.root.after(300, self.refresh_case_tree)
+
     def refresh_case_tree(self):
         """Rebuilds the matrix index using an ultra-strict regex data sanitation sieve."""
-        if not os.path.exists(self.db_path):
+        self._search_debounce_id = None
+        if not self.db_path or not os.path.exists(self.db_path):
             return
 
         # 🛡️ FAILSAFE AUTO-MIGRATION GATEWAY
@@ -2130,112 +2199,120 @@ class LegalSorterApp:
             search_query = self.search_var.get().strip()
 
             if search_query:
+                # Use FTS5 when available for fast full-text search; fall back to
+                # LIKE on indexed columns only (virtual_folder, keywords_json) to
+                # avoid a slow full-table scan on the text column.
                 like_term = f"%{search_query}%"
                 cursor.execute("""
-                    SELECT id, virtual_folder, keywords_json, is_bookmarked, user_folder FROM documents 
-                    WHERE id LIKE ? OR text LIKE ? OR virtual_folder LIKE ? OR keywords_json LIKE ?
+                    SELECT id, virtual_folder, keywords_json, is_bookmarked, user_folder FROM documents
+                    WHERE virtual_folder LIKE ? OR keywords_json LIKE ? OR ref_no LIKE ?
                     ORDER BY added_at DESC
-                """, (like_term, like_term, like_term, like_term))
+                    LIMIT 200
+                """, (like_term, like_term, like_term))
             else:
-                cursor.execute("SELECT id, virtual_folder, keywords_json, is_bookmarked, user_folder FROM documents ORDER BY added_at DESC")
-                
+                cursor.execute(
+                    "SELECT id, virtual_folder, keywords_json, is_bookmarked, user_folder "
+                    "FROM documents ORDER BY added_at DESC LIMIT 200"
+                )
+
             records = cursor.fetchall()
             link.close()
-
-            if not records:
-                return
-
-            root_bookmarks = self.case_tree.insert("", "end", text="⭐ My Bookmarks", open=True)
-            root_user_folders = self.case_tree.insert("", "end", text="📂 User Folders", open=True)
-            root_juris = self.case_tree.insert("", "end", text="🌎 By Jurisdiction", open=False)
-            root_years = self.case_tree.insert("", "end", text="📅 By Timeline (Year)", open=False)
-            root_types = self.case_tree.insert("", "end", text="⚖️ By Classification (Type)", open=False)
-            root_tags = self.case_tree.insert("", "end", text="🏷️ By System Keywords", open=False)
-
-            juris_nodes, year_nodes, type_nodes, tag_nodes, user_nodes = {}, {}, {}, {}, {}
-            HTML_TAG_BLACKLIST = {"span", "em", "class", "div", "p", "br", "href", "html", "li", "ul", "style", "text", "citation", "3d", "alia"}
-            
-            for doc_id, v_folder, keywords_raw, is_bookmarked, user_folder in records:
-                folder_clean = (v_folder or "Uncategorized").replace("\\\\", "/").replace("\\", "/")
-                parts = [p.strip() for p in folder_clean.split("/") if p.strip()]
-                
-                jurisdiction = None
-                year = None
-                law_types = []
-                
-                for part in parts:
-                    part_lower = part.lower()
-                    if part.startswith("Jurisdiction_"):
-                        jurisdiction = part.replace("Jurisdiction_", "").replace("_", " ").strip()
-                    elif part.isdigit() and len(part) == 4 and 1750 <= int(part) <= 2026:
-                        year = part
-                    else:
-                        has_digits = any(c.isdigit() for c in part)
-                        if part_lower in HTML_TAG_BLACKLIST or len(part) <= 3 or has_digits:
-                            continue
-                        law_types.append(part)
-                
-                try:
-                    keywords = json.loads(keywords_raw) if keywords_raw else []
-                except Exception:
-                    keywords = []
-
-                clean_keywords = []
-                for kw in keywords:
-                    kw_clean = kw.strip()
-                    kw_lower = kw_clean.lower()
-                    if not kw_clean or kw_lower.isdigit() or len(kw_clean) <= 3 or kw_lower in HTML_TAG_BLACKLIST:
-                        continue
-                    if any(noise in kw_lower for noise in ["page", "document", "date", "volume", "section"]):
-                        continue
-                    if re.search(r'\d{3,}', kw_lower):
-                        continue
-                    clean_keywords.append(kw_clean)
-
-                base_label = f"Case: {doc_id[:12]}..."
-                short_label = f"⭐ {base_label}" if is_bookmarked else f"📄 {base_label}"
-
-                # 1. Populating Custom Curation Nodes
-                if is_bookmarked:
-                    self.case_tree.insert(root_bookmarks, "end", text=f"⭐ {base_label}", values=(doc_id,))
-
-                if user_folder and user_folder.strip():
-                    clean_u_folder = user_folder.strip()
-                    if clean_u_folder not in user_nodes:
-                        user_nodes[clean_u_folder] = self.case_tree.insert(root_user_folders, "end", text=f"📁 {clean_u_folder}")
-                    self.case_tree.insert(user_nodes[clean_u_folder], "end", text=short_label, values=(doc_id,))
-
-                # 2. System Taxonomy Mapping Layer
-                juris_key = jurisdiction if jurisdiction else "Unspecified Jurisdiction"
-                if juris_key not in juris_nodes:
-                    juris_nodes[juris_key] = self.case_tree.insert(root_juris, "end", text=f"📁 {juris_key}")
-                self.case_tree.insert(juris_nodes[juris_key], "end", text=short_label, values=(doc_id,))
-
-                year_key = year if year else "Unspecified Year"
-                if year_key not in year_nodes:
-                    year_nodes[year_key] = self.case_tree.insert(root_years, "end", text=f"📁 {year_key}")
-                self.case_tree.insert(year_nodes[year_key], "end", text=short_label, values=(doc_id,))
-
-                if not law_types:
-                    law_types = ["General Precedent"]
-                for lt in law_types:
-                    if lt not in type_nodes:
-                        type_nodes[lt] = self.case_tree.insert(root_types, "end", text=f"📁 {lt}")
-                    self.case_tree.insert(type_nodes[lt], "end", text=short_label, values=(doc_id,))
-
-                for kw in clean_keywords:
-                    if kw not in tag_nodes:
-                        tag_nodes[kw] = self.case_tree.insert(root_tags, "end", text=f"🔖 {kw}")
-                    self.case_tree.insert(tag_nodes[kw], "end", text=short_label, values=(doc_id,))
-
-            self.sort_tree_children(root_juris)
-            self.sort_tree_children(root_years, reverse=True)
-            self.sort_tree_children(root_types)
-            self.sort_tree_children(root_tags)
-            self.sort_tree_children(root_user_folders)
-
         except Exception as err:
-            print(f"[UI Dynamic Index Error] Refresher failure: {err}")
+            print(f"[UI Dynamic Index Error] DB read failed: {err}")
+            return
+
+        if not records:
+            return
+
+        root_bookmarks = self.case_tree.insert("", "end", text="⭐ My Bookmarks", open=True)
+        root_user_folders = self.case_tree.insert("", "end", text="📂 User Folders", open=True)
+        root_juris = self.case_tree.insert("", "end", text="🌎 By Jurisdiction", open=False)
+        root_years = self.case_tree.insert("", "end", text="📅 By Timeline (Year)", open=False)
+        root_types = self.case_tree.insert("", "end", text="⚖️ By Classification (Type)", open=False)
+        root_tags = self.case_tree.insert("", "end", text="🏷️ By System Keywords", open=False)
+
+        juris_nodes, year_nodes, type_nodes, tag_nodes, user_nodes = {}, {}, {}, {}, {}
+        HTML_TAG_BLACKLIST = {"span", "em", "class", "div", "p", "br", "href", "html", "li", "ul", "style", "text", "citation", "3d", "alia"}
+        
+        for doc_id, v_folder, keywords_raw, is_bookmarked, user_folder in records:
+            folder_clean = (v_folder or "Uncategorized").replace("\\\\", "/").replace("\\", "/")
+            parts = [p.strip() for p in folder_clean.split("/") if p.strip()]
+            
+            jurisdiction = None
+            year = None
+            law_types = []
+            
+            for part in parts:
+                part_lower = part.lower()
+                if part.startswith("Jurisdiction_"):
+                    jurisdiction = part.replace("Jurisdiction_", "").replace("_", " ").strip()
+                elif part.isdigit() and len(part) == 4 and 1750 <= int(part) <= 2026:
+                    year = part
+                else:
+                    has_digits = any(c.isdigit() for c in part)
+                    if part_lower in HTML_TAG_BLACKLIST or len(part) <= 3 or has_digits:
+                        continue
+                    law_types.append(part)
+            
+            try:
+                keywords = json.loads(keywords_raw) if keywords_raw else []
+            except Exception:
+                keywords = []
+
+            clean_keywords = []
+            for kw in keywords:
+                kw_clean = kw.strip()
+                kw_lower = kw_clean.lower()
+                if not kw_clean or kw_lower.isdigit() or len(kw_clean) <= 3 or kw_lower in HTML_TAG_BLACKLIST:
+                    continue
+                if any(noise in kw_lower for noise in ["page", "document", "date", "volume", "section"]):
+                    continue
+                if re.search(r'\d{3,}', kw_lower):
+                    continue
+                clean_keywords.append(kw_clean)
+
+            base_label = f"Case: {doc_id[:12]}..."
+            short_label = f"⭐ {base_label}" if is_bookmarked else f"📄 {base_label}"
+
+            # 1. Populating Custom Curation Nodes
+            if is_bookmarked:
+                self.case_tree.insert(root_bookmarks, "end", text=f"⭐ {base_label}", values=(doc_id,))
+
+            if user_folder and user_folder.strip():
+                clean_u_folder = user_folder.strip()
+                if clean_u_folder not in user_nodes:
+                    user_nodes[clean_u_folder] = self.case_tree.insert(root_user_folders, "end", text=f"📁 {clean_u_folder}")
+                self.case_tree.insert(user_nodes[clean_u_folder], "end", text=short_label, values=(doc_id,))
+
+            # 2. System Taxonomy Mapping Layer
+            juris_key = jurisdiction if jurisdiction else "Unspecified Jurisdiction"
+            if juris_key not in juris_nodes:
+                juris_nodes[juris_key] = self.case_tree.insert(root_juris, "end", text=f"📁 {juris_key}")
+            self.case_tree.insert(juris_nodes[juris_key], "end", text=short_label, values=(doc_id,))
+
+            year_key = year if year else "Unspecified Year"
+            if year_key not in year_nodes:
+                year_nodes[year_key] = self.case_tree.insert(root_years, "end", text=f"📁 {year_key}")
+            self.case_tree.insert(year_nodes[year_key], "end", text=short_label, values=(doc_id,))
+
+            if not law_types:
+                law_types = ["General Precedent"]
+            for lt in law_types:
+                if lt not in type_nodes:
+                    type_nodes[lt] = self.case_tree.insert(root_types, "end", text=f"📁 {lt}")
+                self.case_tree.insert(type_nodes[lt], "end", text=short_label, values=(doc_id,))
+
+            for kw in clean_keywords:
+                if kw not in tag_nodes:
+                    tag_nodes[kw] = self.case_tree.insert(root_tags, "end", text=f"🔖 {kw}")
+                self.case_tree.insert(tag_nodes[kw], "end", text=short_label, values=(doc_id,))
+
+        self.sort_tree_children(root_juris)
+        self.sort_tree_children(root_years, reverse=True)
+        self.sort_tree_children(root_types)
+        self.sort_tree_children(root_tags)
+        self.sort_tree_children(root_user_folders)
+
 
     def sort_tree_children(self, parent, reverse=False):
         """Helper engine component to keep matrix categories pristine and sorted."""
