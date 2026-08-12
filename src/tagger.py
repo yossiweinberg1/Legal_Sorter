@@ -132,10 +132,29 @@ def extract_keywords_tfidf(text: str, corpus_texts: list[str], top_n: int = 8) -
     return [terms[i] for i in top_idx if row[i] > 0]
 
 
+_STOPWORDS = frozenset({
+    "about", "above", "after", "again", "against", "also", "among", "another",
+    "any", "because", "been", "before", "being", "between", "both", "came",
+    "cannot", "come", "could", "court", "does", "done", "each", "even",
+    "ever", "every", "find", "first", "found", "from", "further", "given",
+    "have", "having", "here", "however", "into", "itself", "just", "know",
+    "latter", "like", "made", "make", "many", "more", "most", "much", "must",
+    "need", "neither", "none", "note", "nothing", "number", "once", "only",
+    "order", "other", "over", "part", "person", "place", "point", "prior",
+    "provide", "rather", "right", "same", "section", "shall", "should",
+    "since", "some", "state", "such", "than", "that", "their", "them",
+    "then", "there", "these", "they", "this", "those", "through", "thus",
+    "time", "upon", "used", "very", "want", "well", "were", "what", "when",
+    "where", "which", "while", "whom", "will", "with", "within", "without",
+    "would", "your",
+})
+
+
 def _top_frequency_terms(text: str, top_n: int) -> list[str]:
     words = re.findall(r"[A-Za-z]{4,}", text.lower())
+    filtered = [w for w in words if w not in _STOPWORDS]
     from collections import Counter
-    common = Counter(words).most_common(top_n)
+    common = Counter(filtered).most_common(top_n)
     return [w for w, _ in common]
 
 

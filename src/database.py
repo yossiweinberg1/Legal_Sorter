@@ -148,6 +148,19 @@ CREATE INDEX IF NOT EXISTS idx_citation_relationships_from_doc ON citation_relat
 CREATE INDEX IF NOT EXISTS idx_citation_relationships_to_doc ON citation_relationships (to_doc_id);
 CREATE INDEX IF NOT EXISTS idx_citation_relationships_key ON citation_relationships (citation_key);
 CREATE INDEX IF NOT EXISTS idx_citation_relationships_treatment ON citation_relationships (treatment);
+
+CREATE TABLE IF NOT EXISTS docket_clusters (
+    cluster_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    docket_number TEXT,
+    case_name TEXT,
+    court TEXT,
+    year TEXT,
+    notes TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_docket_clusters_docket ON docket_clusters (docket_number);
+CREATE INDEX IF NOT EXISTS idx_documents_cluster_id ON documents (cluster_id);
 """
 
 FTS_SETUP = """
@@ -289,6 +302,20 @@ class DB:
         self._backfill_citation_index_keys()
 
         self._backfill_barcodes()
+
+        # --- CLUSTER / DOCKET COLUMN MIGRATION ---
+        try:
+            self.safe_execute("ALTER TABLE documents ADD COLUMN cluster_id INTEGER")
+            self.safe_commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self.safe_execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_cluster_id ON documents (cluster_id)"
+            )
+            self.safe_commit()
+        except Exception:
+            pass
 
     def safe_execute(self, sql, params=()):
         return safe_connection_execute(self.conn, sql, params)
@@ -504,6 +531,224 @@ class DB:
                 self.set_barcode(doc_id, barcode, strategy=strategy, confidence=confidence)
             except Exception:
                 pass  # never let a backfill error block startup
+
+    # ---------- docket clusters ----------
+
+    # Patterns used to extract docket/case numbers from legal text.
+    # Ordered from most specific to most general to minimise false positives.
+    _DOCKET_PATTERNS = [
+        # Federal district style:  1:23-cv-12345  /  2:24-cr-00010
+        r'\b(\d{1,2}:\d{2,4}-[a-zA-Z]{2,4}-\d{4,6}(?:-\d+)?)\b',
+        # Appeal style:  No. 23-1234  /  Case No. 2023-CA-0001-AP
+        r'(?:(?:Case\s+)?No\.|Docket\s+No\.)\s+([A-Z0-9][A-Z0-9:/_.-]{3,24})',
+        # Short appellate:  CV-23-12345  /  CR-2024-00001
+        r'\b([A-Z]{2,4}-\d{2,4}-\d{4,6})\b',
+    ]
+
+    @classmethod
+    def _extract_docket_numbers(cls, text: str) -> list[str]:
+        """Return a deduplicated list of docket numbers found in *text*.
+
+        Uses conservative patterns to minimise false positives.  Returns at
+        most 5 candidates (the earliest-occurring ones).
+        """
+        import re as _re
+        found: list[str] = []
+        seen: set[str] = set()
+        search_text = (text or "")[:8000]
+        for pattern in cls._DOCKET_PATTERNS:
+            for m in _re.finditer(pattern, search_text):
+                candidate = m.group(1) if m.lastindex else m.group(0)
+                candidate = candidate.strip(" ./,;")
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    found.append(candidate)
+        return found[:5]
+
+    def create_cluster(
+        self,
+        docket_number: str | None = None,
+        case_name: str | None = None,
+        court: str | None = None,
+        year: str | None = None,
+        notes: str | None = None,
+    ) -> int:
+        """Create a new docket cluster and return its cluster_id."""
+        cur = self.safe_execute(
+            """INSERT INTO docket_clusters (docket_number, case_name, court, year, notes)
+               VALUES (?, ?, ?, ?, ?)""",
+            (docket_number, case_name, court, year, notes),
+        )
+        self.safe_commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def assign_cluster(self, doc_id: str, cluster_id: int | None) -> None:
+        """Set (or clear) the cluster_id for a document."""
+        self.safe_execute(
+            "UPDATE documents SET cluster_id = ? WHERE id = ?",
+            (cluster_id, doc_id),
+        )
+        self.safe_commit()
+
+    def get_cluster(self, cluster_id: int) -> dict | None:
+        """Return cluster metadata or None if not found."""
+        row = self.safe_execute(
+            """SELECT cluster_id, docket_number, case_name, court, year, notes, created_at
+               FROM docket_clusters WHERE cluster_id = ?""",
+            (cluster_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "cluster_id": row[0],
+            "docket_number": row[1],
+            "case_name": row[2],
+            "court": row[3],
+            "year": row[4],
+            "notes": row[5],
+            "created_at": row[6],
+        }
+
+    def get_cluster_documents(self, cluster_id: int) -> list[dict]:
+        """Return all documents assigned to *cluster_id*, ordered by added_at."""
+        rows = self.safe_execute(
+            """SELECT id, ref_no, virtual_folder, source_url, barcode,
+                      barcode_confidence, added_at, keywords_json, entities_json
+               FROM documents WHERE cluster_id = ?
+               ORDER BY added_at""",
+            (cluster_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "ref_no": r[1],
+                "virtual_folder": r[2],
+                "source_url": r[3],
+                "barcode": r[4],
+                "barcode_confidence": r[5],
+                "added_at": r[6],
+                "keywords": json.loads(r[7]) if r[7] else [],
+                "entities": json.loads(r[8]) if r[8] else {},
+            }
+            for r in rows
+        ]
+
+    def list_clusters(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Return clusters ordered by creation date (newest first), with doc counts."""
+        rows = self.safe_execute(
+            """SELECT dc.cluster_id, dc.docket_number, dc.case_name, dc.court, dc.year,
+                      dc.notes, dc.created_at,
+                      COUNT(d.id) AS doc_count
+               FROM docket_clusters dc
+               LEFT JOIN documents d ON d.cluster_id = dc.cluster_id
+               GROUP BY dc.cluster_id
+               ORDER BY dc.created_at DESC
+               LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ).fetchall()
+        return [
+            {
+                "cluster_id": r[0],
+                "docket_number": r[1],
+                "case_name": r[2],
+                "court": r[3],
+                "year": r[4],
+                "notes": r[5],
+                "created_at": r[6],
+                "doc_count": r[7],
+            }
+            for r in rows
+        ]
+
+    def auto_affix_dockets(self, dry_run: bool = False) -> dict:
+        """Heuristically group un-clustered documents by shared docket numbers.
+
+        Algorithm
+        ---------
+        1. For every document without a ``cluster_id``, extract docket numbers
+           from the first 8 000 characters of its text.
+        2. Build a mapping  docket_number → [doc_id, …]  from those candidates.
+        3. Any docket number shared by 2+ documents is a *cluster candidate*.
+        4. Existing clusters whose ``docket_number`` matches are reused;
+           otherwise a new cluster is created.
+        5. Documents in a candidate group that already belong to a *different*
+           cluster are left alone (conserved to avoid false positives).
+
+        Parameters
+        ----------
+        dry_run : bool
+            When True the database is not modified; only a report is returned.
+
+        Returns
+        -------
+        dict with keys:
+            scanned          — total documents examined
+            candidates       — docket numbers with 2+ documents
+            clusters_created — new docket_clusters rows inserted
+            docs_assigned    — documents whose cluster_id was set
+            proposals        — list of {docket_number, doc_ids, cluster_id|None}
+        """
+        rows = self.safe_execute(
+            """SELECT id, SUBSTR(text, 1, 8000) FROM documents
+               WHERE cluster_id IS NULL AND text IS NOT NULL
+               ORDER BY added_at""",
+        ).fetchall()
+
+        # docket_number → list of doc_ids
+        docket_map: dict[str, list[str]] = {}
+        for doc_id, text in rows:
+            for dn in self._extract_docket_numbers(text):
+                docket_map.setdefault(dn, []).append(doc_id)
+
+        proposals = []
+        clusters_created = 0
+        docs_assigned = 0
+
+        for docket_number, doc_ids in docket_map.items():
+            if len(doc_ids) < 2:
+                continue  # only a single document — not a useful cluster
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            unique_ids = [d for d in doc_ids if not (d in seen or seen.add(d))]  # type: ignore[func-returns-value]
+
+            # Look for an existing cluster with this docket number
+            existing = self.safe_execute(
+                "SELECT cluster_id FROM docket_clusters WHERE docket_number = ? LIMIT 1",
+                (docket_number,),
+            ).fetchone()
+            cluster_id: int | None = existing[0] if existing else None
+
+            proposals.append(
+                {
+                    "docket_number": docket_number,
+                    "doc_ids": unique_ids,
+                    "cluster_id": cluster_id,
+                }
+            )
+
+            if dry_run:
+                continue
+
+            if cluster_id is None:
+                cluster_id = self.create_cluster(docket_number=docket_number)
+                clusters_created += 1
+
+            for doc_id in unique_ids:
+                # Only assign if the document is still un-clustered at commit time
+                current = self.safe_execute(
+                    "SELECT cluster_id FROM documents WHERE id = ?", (doc_id,)
+                ).fetchone()
+                if current and current[0] is None:
+                    self.assign_cluster(doc_id, cluster_id)
+                    docs_assigned += 1
+
+        return {
+            "scanned": len(rows),
+            "candidates": len(proposals),
+            "clusters_created": clusters_created,
+            "docs_assigned": docs_assigned,
+            "proposals": proposals,
+        }
 
     def barcode_prefix_search(
         self,
