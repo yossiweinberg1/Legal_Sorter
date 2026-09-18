@@ -1,6 +1,4 @@
-"""Phase 1 dictionary and word-sense engine."""
+from .frame_models import Frame, Hypothesis, SLOT_NAMES
+from .phase2 import FrameEngine, Phase2Result
 
-from .models import SenseResult, Meaning, Span
-from .sense_engine import WordSenseEngine
-
-__all__ = ["Meaning", "SenseResult", "Span", "WordSenseEngine"]
+__all__ = ["Frame", "FrameEngine", "Hypothesis", "Phase2Result", "SLOT_NAMES"]
